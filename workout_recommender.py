@@ -1,0 +1,184 @@
+"""
+Workout recommender — orchestrates the rules layer and calls Claude.
+
+Flow:
+  1. classify_recovery()   — pure rules, converts Garmin data → recovery tier
+  2. analyze_week()        — pure rules, converts activities  → weekly summary
+  3. Build a structured prompt with interpreted context only (no raw HRV ms)
+  4. Claude decides the specific workout and writes it in full detail
+
+Claude never sees raw HRV numbers — only the tier, its meaning, and constraints.
+"""
+
+import os
+from datetime import date
+
+import anthropic
+
+from recovery import classify_recovery
+from workout_history import analyze_week
+
+
+_TIER_CONTEXT = {
+    "high": (
+        "Recovery is HIGH. HRV is at or above the 7-day baseline and sleep was "
+        "strong. The body is primed to adapt to hard training."
+    ),
+    "moderate": (
+        "Recovery is MODERATE. One or both of HRV and sleep are slightly below "
+        "optimal but the body is still ready to train. Avoid going to absolute "
+        "failure — keep a rep or two in the tank."
+    ),
+    "low": (
+        "Recovery is LOW. Stress markers are elevated and/or sleep was poor. "
+        "Training is still appropriate but intensity must stay conservative. "
+        "The goal is stimulus without digging a deeper hole."
+    ),
+    "very_low": (
+        "Recovery is VERY LOW. The body is clearly under-recovered. "
+        "A hard session today would be counterproductive. "
+        "Recommend active recovery only — light movement, mobility, walking."
+    ),
+}
+
+
+def _event_blurb(target_event: dict) -> str:
+    """Return a one-line event context string, or empty string if no event set."""
+    name = (target_event or {}).get("name", "").strip()
+    date_str = (target_event or {}).get("date", "").strip()
+    if not name or not date_str:
+        return ""
+    try:
+        event_date = date.fromisoformat(date_str)
+        days_left = (event_date - date.today()).days
+    except ValueError:
+        return f"Target event: {name}"
+
+    if days_left <= 0:
+        return f"{name} has passed (or is today)."
+    elif days_left <= 7:
+        return (
+            f"RACE WEEK — {name} is in {days_left} day(s). "
+            "No hard efforts. Prioritise rest, stay loose, protect the legs."
+        )
+    elif days_left <= 14:
+        return (
+            f"TAPER — {name} is in {days_left} days. "
+            "Reduce volume, keep a touch of sharpness, avoid injury risk."
+        )
+    elif days_left <= 28:
+        return (
+            f"Final build — {name} is in {days_left} days. "
+            "Balance quality sessions with adequate recovery."
+        )
+    else:
+        return f"Target event: {name} in {days_left} days."
+
+
+def get_workout_recommendation(
+    garmin_data: dict,
+    user_profile: dict,
+    weather: str = "",
+) -> dict:
+    """
+    Generate a personalised morning workout recommendation.
+
+    Args:
+        garmin_data:  Output of garmin.fetch_daily_stats().
+        user_profile: Contents of user_profile.json.
+        weather:      One-line weather string (optional).
+
+    Returns:
+        {
+            "recommendation": str,   # Claude's full workout text
+            "recovery_tier":  str,   # "high" | "moderate" | "low" | "very_low"
+        }
+    """
+    # ── 1. Classify recovery (rules only) ────────────────────────────────────
+    sleep = garmin_data.get("sleep", {})
+    hrv = garmin_data.get("hrv", {})
+
+    recovery = classify_recovery(
+        sleep_score=sleep.get("sleep_score"),
+        hrv_last_night=hrv.get("last_night_avg"),
+        hrv_weekly_avg=hrv.get("weekly_avg"),
+    )
+
+    # ── 2. Analyse workout history (rules only) ───────────────────────────────
+    history = analyze_week(garmin_data.get("recent_activities", []))
+
+    # ── 3. Assemble prompt context ────────────────────────────────────────────
+    name = user_profile.get("name", "Athlete")
+    age = user_profile.get("age", "N/A")
+    weight = user_profile.get("weight_kg", "N/A")
+    level = user_profile.get("fitness_level", "intermediate")
+    primary_goal = (
+        user_profile.get("primary_goal")
+        or user_profile.get("fitness_goal", "general fitness")
+    )
+    secondary_goal = user_profile.get("secondary_goal", "")
+    weekly_days = (
+        user_profile.get("weekly_training_days")
+        or user_profile.get("workouts_per_week", 5)
+    )
+    session_duration = user_profile.get("preferred_session_duration_minutes", 60)
+    event_blurb = _event_blurb(user_profile.get("target_event", {}))
+
+    tier = recovery["tier"]
+
+    # Week summary lines
+    week_lines = history["last_week_activities"]
+    week_summary = (
+        "\n".join(f"  - {line}" for line in week_lines)
+        if week_lines
+        else "  - No sessions recorded this week yet"
+    )
+    hours_since = history["hours_since_last_workout"]
+    hours_str = f"{hours_since:.0f} hours ago" if hours_since is not None else "unknown"
+
+    # ── 4. Build the prompt ───────────────────────────────────────────────────
+    prompt = f"""You are a personal fitness coach writing a morning workout recommendation.
+
+## Athlete
+- Name: {name}, Age: {age}, Weight: {weight} kg, Level: {level}
+- Primary goal: {primary_goal}
+{f"- Secondary goal: {secondary_goal}" if secondary_goal else ""}\
+{f"- {event_blurb}" if event_blurb else ""}
+- Weekly training days: {weekly_days} | Preferred session: {session_duration} min
+
+## Today's Recovery — {recovery["label"]}
+{_TIER_CONTEXT[tier]}
+Coaching note: {recovery["note"]}
+Intensity ceiling: {recovery["intensity_ceiling"]} (max RPE {recovery["max_rpe"]}/10)
+
+## This Week's Training So Far
+{week_summary}
+- Sessions this week: {history["total_sessions_this_week"]}
+- Km run this week: {history["km_run_this_week"]} km
+- Gym sessions this week: {history["gym_sessions_this_week"]}
+- Last workout: {hours_str}
+- Trained yesterday: {"Yes" if history["trained_yesterday"] else "No"}
+
+## Weather
+{weather if weather else "N/A"}
+
+## Your Task
+Write today's complete workout recommendation for {name}. Be specific:
+- Gym session → exact exercises, sets × reps, RPE per exercise
+- Run → distance, structure (warmup / main set / cooldown), pace guidance via RPE or HR zone
+- Active recovery → exactly what to do and for how long
+Respect the intensity ceiling above. Target ~{session_duration} min total.
+Speak directly to {name}. Concise and actionable — under 220 words."""
+
+    # ── 5. Call Claude ────────────────────────────────────────────────────────
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=600,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    return {
+        "recommendation": response.content[0].text,
+        "recovery_tier": tier,
+    }

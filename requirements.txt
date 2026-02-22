@@ -1,0 +1,17 @@
+# Telegram bot
+python-telegram-bot==21.6
+
+# Claude AI
+anthropic>=0.40.0
+
+# AWS
+boto3==1.35.0
+
+# Environment variables
+python-dotenv==1.0.1
+
+# HTTP requests (Garmin, weather APIs)
+requests==2.32.3
+
+# Utilities
+pytz==2024.1
