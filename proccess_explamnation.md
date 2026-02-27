@@ -1,1 +1,0 @@
-ssh -i private-ssh-key.key ubuntu@129.159.141.62 

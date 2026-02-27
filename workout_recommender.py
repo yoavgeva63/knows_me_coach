@@ -16,7 +16,7 @@ from datetime import date
 import anthropic
 
 from recovery import classify_recovery
-from workout_history import analyze_week
+from garmin_activity_analyzer import analyze_week
 
 
 _TIER_CONTEXT = {
@@ -79,14 +79,17 @@ def get_workout_recommendation(
     garmin_data: dict,
     user_profile: dict,
     weather: str = "",
+    conversation_history: list[dict] | None = None,
 ) -> dict:
     """
     Generate a personalised morning workout recommendation.
 
     Args:
-        garmin_data:  Output of garmin.fetch_daily_stats().
-        user_profile: Contents of user_profile.json.
-        weather:      One-line weather string (optional).
+        garmin_data:          Output of garmin.fetch_daily_stats().
+        user_profile:         User profile dict including coach_notes.
+        weather:              One-line weather string (optional).
+        conversation_history: Prior conversation messages — gives Claude context
+                              about things discussed before /morning was called.
 
     Returns:
         {
@@ -123,6 +126,7 @@ def get_workout_recommendation(
     )
     session_duration = user_profile.get("preferred_session_duration_minutes", 60)
     event_blurb = _event_blurb(user_profile.get("target_event", {}))
+    coach_notes = user_profile.get("coach_notes", [])
 
     tier = recovery["tier"]
 
@@ -137,6 +141,11 @@ def get_workout_recommendation(
     hours_str = f"{hours_since:.0f} hours ago" if hours_since is not None else "unknown"
 
     # ── 4. Build the prompt ───────────────────────────────────────────────────
+    coach_notes_block = ""
+    if coach_notes:
+        notes_lines = "\n".join(f"  - {n.get('date', '?')}: {n.get('note', '')}" for n in coach_notes)
+        coach_notes_block = f"\n## Coach Notes (long-term memory — respect these)\n{notes_lines}"
+
     prompt = f"""You are a personal fitness coach writing a morning workout recommendation.
 
 ## Athlete
@@ -144,7 +153,7 @@ def get_workout_recommendation(
 - Primary goal: {primary_goal}
 {f"- Secondary goal: {secondary_goal}" if secondary_goal else ""}\
 {f"- {event_blurb}" if event_blurb else ""}
-- Weekly training days: {weekly_days} | Preferred session: {session_duration} min
+- Weekly training days: {weekly_days} | Preferred session: {session_duration} min{coach_notes_block}
 
 ## Today's Recovery — {recovery["label"]}
 {_TIER_CONTEXT[tier]}
@@ -175,7 +184,7 @@ Speak directly to {name}. Concise and actionable — under 220 words."""
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=600,
-        messages=[{"role": "user", "content": prompt}],
+        messages=(conversation_history or []) + [{"role": "user", "content": prompt}],
     )
 
     return {

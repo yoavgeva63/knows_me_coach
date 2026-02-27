@@ -26,94 +26,81 @@ Your communication style:
 - Ask clarifying questions when needed before giving advice
 - Remember context from earlier in the conversation
 
-When you don't have data (e.g. no Garmin sync yet), ask the user to fill in the gaps manually \
-and note that passive tracking will be connected soon.
-
+When you don't have data (e.g. no Garmin sync yet) assume from the past and tell the user.
 Always respond in the same language the user writes in."""
 
 
-def get_morning_briefing(garmin_data: dict, user_profile: dict, weather: str = "") -> str:
-    """Generate a personalised morning briefing from Garmin data and user profile.
+def _fmt_seconds(s) -> str:
+    if not isinstance(s, (int, float)):
+        return "N/A"
+    h, m = divmod(int(s) // 60, 60)
+    return f"{h}h {m}m"
 
-    Args:
-        garmin_data:  Output of garmin.fetch_daily_stats().
-        user_profile: Contents of user_profile.json.
-        weather:      One-line weather string from wttr.in (optional).
 
-    Returns:
-        A short, Telegram-formatted morning message from Claude.
-    """
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
+def _format_garmin_context(garmin_data: dict) -> str:
     sleep = garmin_data.get("sleep", {})
     hrv = garmin_data.get("hrv", {})
     steps = garmin_data.get("steps", {})
     activity = garmin_data.get("last_activity", {})
+    recent = garmin_data.get("recent_activities", [])
 
-    # Format seconds → h m for readability in the prompt
-    def _fmt_seconds(s):
-        if not isinstance(s, (int, float)):
-            return "N/A"
-        h, m = divmod(int(s) // 60, 60)
-        return f"{h}h {m}m"
+    lines = [
+        f"Date: {garmin_data.get('date', 'N/A')}",
+        f"Sleep score: {sleep.get('sleep_score', 'N/A')}/100, "
+        f"total: {_fmt_seconds(sleep.get('total_sleep_seconds'))}, "
+        f"deep: {_fmt_seconds(sleep.get('deep_sleep_seconds'))}, "
+        f"REM: {_fmt_seconds(sleep.get('rem_sleep_seconds'))}",
+        f"HRV: {hrv.get('last_night_avg', 'N/A')} ms (weekly avg {hrv.get('weekly_avg', 'N/A')} ms, status: {hrv.get('status', 'N/A')})",
+        f"Steps today: {steps.get('total_steps', 'N/A')}",
+        f"Last workout: {activity.get('name', 'N/A')} ({activity.get('type', 'N/A')}) "
+        f"on {activity.get('start_time', 'N/A')}, "
+        f"duration {_fmt_seconds(activity.get('duration_seconds'))}, "
+        f"avg HR {activity.get('avg_hr', 'N/A')} bpm",
+    ]
 
-    prompt = f"""You are a personal fitness coach. Generate a morning briefing for your athlete.
+    if recent:
+        recent_summary = "; ".join(
+            f"{a.get('name', 'N/A')} {_fmt_seconds(a.get('duration_seconds'))} on {a.get('start_time', 'N/A')}"
+            for a in recent[:5]
+        )
+        lines.append(f"Recent activities (last 5): {recent_summary}")
 
-## Athlete Profile
-- Name: {user_profile.get('name', 'Athlete')}
-- Age: {user_profile.get('age', 'N/A')}
-- Goal: {user_profile.get('fitness_goal', 'general fitness')}
-- Level: {user_profile.get('fitness_level', 'intermediate')}
-- Target workouts/week: {user_profile.get('workouts_per_week', 5)}
-- Weight: {user_profile.get('weight_kg', 'N/A')} kg
+    return "\n".join(lines)
 
-## Last Night's Recovery Data (from Garmin)
-- Sleep score: {sleep.get('sleep_score', 'N/A')} / 100
-- Total sleep: {_fmt_seconds(sleep.get('total_sleep_seconds'))}
-- Deep sleep: {_fmt_seconds(sleep.get('deep_sleep_seconds'))}
-- REM sleep: {_fmt_seconds(sleep.get('rem_sleep_seconds'))}
-- HRV last night: {hrv.get('last_night_avg', 'N/A')} ms
-- HRV weekly avg: {hrv.get('weekly_avg', 'N/A')} ms
-- HRV status: {hrv.get('status', 'N/A')}
-- Steps yesterday: {steps.get('total_steps', 'N/A')}
 
-## Last Workout
-- Name: {activity.get('name', 'N/A')}
-- Type: {activity.get('type', 'N/A')}
-- When: {activity.get('start_time', 'N/A')}
-- Duration: {_fmt_seconds(activity.get('duration_seconds'))}
-- Distance: {round(activity.get('distance_meters', 0) / 1000, 1) if activity.get('distance_meters') else 'N/A'} km
-- Avg HR: {activity.get('avg_hr', 'N/A')} bpm
-- Calories: {activity.get('calories', 'N/A')}
+def _format_profile_context(user_profile: dict) -> str:
+    """Format user profile + coach notes for injection into the system prompt."""
+    lines = [
+        "## User Profile",
+        f"Name: {user_profile.get('name', 'N/A')} | "
+        f"Age: {user_profile.get('age', 'N/A')} | "
+        f"Weight: {user_profile.get('weight_kg', 'N/A')} kg | "
+        f"Level: {user_profile.get('fitness_level', 'N/A')}",
+        f"Primary goal: {user_profile.get('primary_goal', user_profile.get('fitness_goal', 'N/A'))}",
+        f"Secondary goal: {user_profile.get('secondary_goal', 'N/A')}",
+        f"Training days/week: {user_profile.get('weekly_training_days', user_profile.get('workouts_per_week', 'N/A'))} | "
+        f"Session duration: {user_profile.get('preferred_session_duration_minutes', 'N/A')} min",
+    ]
 
-## Current Weather
-{weather if weather else "N/A"}
+    target = user_profile.get("target_event", {})
+    if target and target.get("name"):
+        lines.append(f"Target event: {target['name']} on {target.get('date', 'TBD')}")
 
-## Recovery Decision Rules
-- If sleep score < 60 OR HRV last night < 80% of weekly avg → recommend a light/rest day
-- Otherwise → recommend a full training session suited to the athlete's goal and level
+    notes = user_profile.get("coach_notes", [])
+    if notes:
+        lines.append("\n## Coach Notes (long-term memory)")
+        for n in notes:
+            lines.append(f"- {n.get('date', '?')}: {n.get('note', '')}")
 
-## Required Output Format
-Write ONLY the message below — no preamble, no explanation. Keep it under 200 words.
-
-Good morning {user_profile.get('name', 'Champ')} ☀️
-
-😴 Recovery: <1–2 sentences on last night's sleep and HRV>
-🌤 Weather: <current conditions and any relevant note for outdoor training>
-💪 Today's workout: <specific recommendation with sets/reps or duration — adjusted for recovery and weather>
-🥗 Meal suggestion: <one practical meal idea that supports today's training>
-🔥 Motivation: <one punchy motivational sentence>"""
-
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=600,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return response.content[0].text
+    return "\n".join(lines)
 
 
 def get_claude_response(
-    conversation_history: list[dict], user_message: str, weather: str = ""
+    conversation_history: list[dict],
+    user_message: str,
+    weather: str = "",
+    garmin_data: dict | None = None,
+    user_profile: dict | None = None,
 ) -> str:
     """
     Send the conversation history + new user message to Claude and return the reply.
@@ -122,6 +109,8 @@ def get_claude_response(
         conversation_history: List of {"role": "user"|"assistant", "content": "..."} dicts
         user_message: The latest message from the user
         weather: Current weather string (injected into system prompt when available)
+        garmin_data: Latest Garmin daily stats (injected into system prompt when available)
+        user_profile: User profile dict including coach_notes (injected into system prompt)
 
     Returns:
         Claude's reply as a string
@@ -129,8 +118,12 @@ def get_claude_response(
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
     system = SYSTEM_PROMPT
+    if user_profile:
+        system += f"\n\n{_format_profile_context(user_profile)}"
     if weather and weather != "Weather unavailable":
         system += f"\n\nCurrent weather: {weather}"
+    if garmin_data:
+        system += f"\n\nLatest Garmin data:\n{_format_garmin_context(garmin_data)}"
 
     messages = conversation_history + [{"role": "user", "content": user_message}]
 

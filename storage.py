@@ -1,0 +1,150 @@
+"""
+DynamoDB persistence layer for the fitness coach bot.
+All database interaction is centralized here — no other module touches boto3.
+
+Tables (names read from env vars, with sensible defaults):
+  - fitness_coach_history  : per-user conversation message lists
+  - fitness_coach_users    : per-user profile data + coach notes
+"""
+import json
+import logging
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+import boto3
+from botocore.exceptions import ClientError
+
+logger = logging.getLogger(__name__)
+
+HISTORY_TABLE = os.environ.get("DYNAMODB_HISTORY_TABLE", "fitness_coach_history")
+PROFILE_TABLE = os.environ.get("DYNAMODB_USERS_TABLE", "fitness_coach_users")
+
+MAX_MESSAGES = 40
+
+
+def _db():
+    """Return a DynamoDB resource using the configured region."""
+    return boto3.resource("dynamodb", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+
+
+def ensure_tables() -> None:
+    """Create DynamoDB tables if they don't exist. Safe to call on every startup."""
+    db = _db()
+    for table_name in (HISTORY_TABLE, PROFILE_TABLE):
+        try:
+            db.meta.client.describe_table(TableName=table_name)
+            logger.info("DynamoDB table '%s' already exists.", table_name)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ResourceNotFoundException":
+                logger.info("Creating DynamoDB table '%s'...", table_name)
+                table = db.create_table(
+                    TableName=table_name,
+                    KeySchema=[{"AttributeName": "user_id", "KeyType": "HASH"}],
+                    AttributeDefinitions=[{"AttributeName": "user_id", "AttributeType": "S"}],
+                    BillingMode="PAY_PER_REQUEST",
+                )
+                table.wait_until_exists()
+                logger.info("Table '%s' created.", table_name)
+            else:
+                raise
+
+
+# ---------------------------------------------------------------------------
+# Conversation history
+# ---------------------------------------------------------------------------
+
+def load_history(user_id: str) -> list[dict]:
+    """Return the conversation message list for a user, or [] if none stored."""
+    table = _db().Table(HISTORY_TABLE)
+    try:
+        resp = table.get_item(Key={"user_id": user_id})
+        item = resp.get("Item")
+        if item:
+            return json.loads(item["messages"])
+    except Exception as exc:
+        logger.warning("load_history failed for %s: %s", user_id, exc)
+    return []
+
+
+def save_history(user_id: str, messages: list[dict]) -> None:
+    """Persist the message list, trimmed to the last MAX_MESSAGES entries."""
+    if len(messages) > MAX_MESSAGES:
+        messages = messages[-MAX_MESSAGES:]
+    table = _db().Table(HISTORY_TABLE)
+    try:
+        table.put_item(Item={
+            "user_id": user_id,
+            "messages": json.dumps(messages),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as exc:
+        logger.error("save_history failed for %s: %s", user_id, exc)
+
+
+def clear_history(user_id: str) -> None:
+    """Delete the stored conversation history for a user."""
+    table = _db().Table(HISTORY_TABLE)
+    try:
+        table.delete_item(Key={"user_id": user_id})
+    except Exception as exc:
+        logger.error("clear_history failed for %s: %s", user_id, exc)
+
+
+# ---------------------------------------------------------------------------
+# User profile
+# ---------------------------------------------------------------------------
+
+def load_profile(user_id: str, fallback_path: str | None = None) -> dict:
+    """Load the user profile from DynamoDB.
+
+    On first run (no record in DynamoDB), auto-seeds from fallback_path
+    (user_profile.json) when provided, then persists it to DynamoDB.
+    """
+    table = _db().Table(PROFILE_TABLE)
+    try:
+        resp = table.get_item(Key={"user_id": user_id})
+        item = resp.get("Item")
+        if item:
+            return json.loads(item["profile_data"])
+    except Exception as exc:
+        logger.warning("load_profile failed for %s: %s", user_id, exc)
+
+    # First run: seed from the local JSON file if available
+    if fallback_path:
+        path = Path(fallback_path)
+        if path.exists():
+            profile = json.loads(path.read_text(encoding="utf-8"))
+            profile.setdefault("coach_notes", [])
+            save_profile(user_id, profile)
+            logger.info("Seeded DynamoDB profile for user %s from %s", user_id, fallback_path)
+            return profile
+
+    return {}
+
+
+def save_profile(user_id: str, profile: dict) -> None:
+    """Persist the full profile dict to DynamoDB."""
+    table = _db().Table(PROFILE_TABLE)
+    try:
+        table.put_item(Item={
+            "user_id": user_id,
+            "profile_data": json.dumps(profile),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as exc:
+        logger.error("save_profile failed for %s: %s", user_id, exc)
+
+
+def add_coach_note(user_id: str, note: str) -> None:
+    """Append a timestamped note to the user's coach_notes list."""
+    profile = load_profile(user_id)
+    if not profile:
+        logger.warning("add_coach_note: no profile found for user %s", user_id)
+        return
+    notes = profile.setdefault("coach_notes", [])
+    notes.append({
+        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "note": note,
+    })
+    save_profile(user_id, profile)

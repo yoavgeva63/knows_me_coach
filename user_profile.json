@@ -16,5 +16,7 @@
   "preferred_session_duration_minutes": 70,
 
   "workouts_per_week": 5,
-  "garmin_connected": true
+  "garmin_connected": true,
+
+  "coach_notes": []
 }

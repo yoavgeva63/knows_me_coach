@@ -3,16 +3,11 @@ Local development entry point for the Telegram fitness coach bot.
 Run this file directly to test the bot locally with long-polling.
 
 For production, the Lambda handler (lambda_handler.py) handles webhook updates instead.
-
-Usage:
-    python bot.py
 """
-import json
 import logging
 import os
+import re
 import time
-from collections import defaultdict
-from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -20,7 +15,8 @@ from garminconnect import GarminConnectAuthenticationError
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-import garmin
+import garmin_daily_stats
+import storage
 from brain import get_claude_response
 from workout_recommender import get_workout_recommendation
 
@@ -39,13 +35,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load the user profile once at startup so /morning doesn't hit disk every time.
-_profile_path = Path(__file__).parent / "user_profile.json"
-USER_PROFILE: dict = json.loads(_profile_path.read_text(encoding="utf-8")) if _profile_path.exists() else {}
-
-# In-memory conversation history keyed by Telegram user ID.
-# In production this will be replaced by DynamoDB.
-conversation_histories: dict[int, list[dict]] = defaultdict(list)
+_PROFILE_PATH = os.path.join(os.path.dirname(__file__), "user_profile.json")
 
 _raw_id = os.environ.get("ALLOWED_TELEGRAM_USER_ID", "")
 ALLOWED_USER_ID = int(_raw_id) if _raw_id.lstrip("-").isdigit() else 0
@@ -58,12 +48,11 @@ _WEATHER_TTL = 14400  # seconds — refresh at most every 4 hours
 def fetch_weather() -> str:
     """Return a one-line weather string for Tel Aviv using Open-Meteo (no API key needed).
 
-    Result is cached for 30 minutes so every chat message doesn't hit the API.
+    Result is cached for 4 hours so every chat message doesn't hit the API.
     """
     if time.monotonic() < _weather_cache["expires"]:
         return _weather_cache["value"]
 
-    # WMO weather interpretation codes → human-readable descriptions
     WMO = {
         0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
         45: "Foggy", 48: "Icy fog",
@@ -101,6 +90,13 @@ def fetch_weather() -> str:
     return result
 
 
+def _md_to_html(text: str) -> str:
+    """Convert Claude's Markdown to Telegram HTML (bold only)."""
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
+    return text
+
+
 def is_allowed(user_id: int) -> bool:
     """Only respond to the configured user (yourself)."""
     if ALLOWED_USER_ID == 0:
@@ -114,12 +110,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(user_id):
         return
 
-    conversation_histories[user_id].clear()
+    storage.clear_history(str(user_id))
     await update.message.reply_text(
         "Hey! I'm your personal fitness coach 💪\n\n"
         "Tell me about your fitness goals, ask for a workout plan, log a meal, "
         "or just chat about your health. I'm here to help!\n\n"
-        "Use /clear to reset our conversation anytime."
+        "Use /clear to reset our conversation anytime.\n"
+        "Use /remember <fact> to store something I should always know about you."
     )
 
 
@@ -129,8 +126,23 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(user_id):
         return
 
-    conversation_histories[user_id].clear()
+    storage.clear_history(str(user_id))
     await update.message.reply_text("Conversation cleared. Fresh start! 🔄")
+
+
+async def remember(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /remember <text> — store a long-term coach note."""
+    user_id = update.effective_user.id
+    if not is_allowed(user_id):
+        return
+
+    note_text = " ".join(context.args).strip()
+    if not note_text:
+        await update.message.reply_text("Usage: /remember <fact about you>\nExample: /remember I hurt my left knee")
+        return
+
+    storage.add_coach_note(str(user_id), note_text)
+    await update.message.reply_text("Got it, I'll remember that 🧠")
 
 
 async def morning(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -143,12 +155,12 @@ async def morning(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id=update.effective_chat.id, action="typing"
     )
 
-    # Fetch weather (non-blocking fallback on error)
     weather = fetch_weather()
+    profile = storage.load_profile(str(user_id), fallback_path=_PROFILE_PATH)
+    history = storage.load_history(str(user_id))
 
-    # Fetch Garmin data
     try:
-        garmin_data = garmin.fetch_daily_stats()
+        garmin_data = garmin_daily_stats.fetch_daily_stats(force_refresh=True)
     except GarminConnectAuthenticationError:
         await update.message.reply_text(
             "Couldn't connect to Garmin — check your credentials in .env."
@@ -164,9 +176,8 @@ async def morning(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # Generate workout recommendation via rules + Claude
     try:
-        result = get_workout_recommendation(garmin_data, USER_PROFILE, weather)
+        result = get_workout_recommendation(garmin_data, profile, weather, history)
     except Exception as exc:
         logger.error("Workout recommendation error: %s", exc)
         await update.message.reply_text(
@@ -175,7 +186,13 @@ async def morning(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     emoji = _RECOVERY_EMOJI.get(result["recovery_tier"], "⚪")
-    await update.message.reply_text(f"{emoji} {result['recommendation']}")
+    briefing = f"{emoji} {result['recommendation']}"
+    await update.message.reply_text(_md_to_html(briefing), parse_mode="HTML")
+
+    # Append the morning exchange to history and persist (reuse already-loaded list)
+    history.append({"role": "user", "content": "/morning"})
+    history.append({"role": "assistant", "content": briefing})
+    storage.save_history(str(user_id), history)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -188,16 +205,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_text = update.message.text
     logger.info("Message from %s: %s", user_id, user_text[:80])
 
-    # Show typing indicator while waiting for Claude
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id, action="typing"
     )
 
-    history = conversation_histories[user_id]
+    history = storage.load_history(str(user_id))
+    profile = storage.load_profile(str(user_id), fallback_path=_PROFILE_PATH)
     weather = fetch_weather()
+    garmin_data = garmin_daily_stats.fetch_daily_stats()
 
     try:
-        reply = get_claude_response(history, user_text, weather)
+        reply = get_claude_response(history, user_text, weather, garmin_data, profile)
     except Exception as exc:
         logger.error("Claude error: %s", exc)
         await update.message.reply_text(
@@ -205,23 +223,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    # Persist the exchange in memory
     history.append({"role": "user", "content": user_text})
     history.append({"role": "assistant", "content": reply})
+    storage.save_history(str(user_id), history)
 
-    # Keep history bounded to last 40 messages (20 exchanges) to control token cost
-    if len(history) > 40:
-        conversation_histories[user_id] = history[-40:]
-
-    await update.message.reply_text(reply)
+    await update.message.reply_text(_md_to_html(reply), parse_mode="HTML")
 
 
 def main() -> None:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     app = Application.builder().token(token).build()
 
+    storage.ensure_tables()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clear", clear))
+    app.add_handler(CommandHandler("remember", remember))
     app.add_handler(CommandHandler("morning", morning))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 

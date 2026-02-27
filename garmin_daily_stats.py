@@ -1,11 +1,11 @@
 """
 Garmin Connect data-fetching module.
-Provides a single public function, fetch_daily_stats(), that returns the
-health snapshot used by the morning briefing and other bot features.
+Public API: fetch_daily_stats(force_refresh=False)
 """
 
 import os
-from datetime import date, timedelta
+import time
+from datetime import date
 
 from dotenv import load_dotenv
 from garminconnect import Garmin, GarminConnectAuthenticationError
@@ -115,11 +115,37 @@ def _fetch_recent_activities(client: Garmin, limit: int = 7) -> list:
 # Public API
 # ---------------------------------------------------------------------------
 
-def fetch_daily_stats() -> dict:
+_cache: dict = {"value": None, "expires": 0.0}
+_CACHE_TTL = 7200  # seconds — refresh at most every two hours
+
+
+def fetch_daily_stats(force_refresh: bool = False) -> dict | None:
+    """Return Garmin daily stats, using an in-memory cache by default.
+
+    Args:
+        force_refresh: When True, bypass the cache and always fetch from Garmin.
+                       Exceptions are re-raised so the caller can report them.
+                       When False (default), silently falls back to stale data on error.
+    """
+    if not force_refresh and time.monotonic() < _cache["expires"] and _cache["value"]:
+        return _cache["value"]
+    try:
+        data = _fetch_new_daily_stats()
+        _cache["value"] = data
+        _cache["expires"] = time.monotonic() + _CACHE_TTL
+        return data
+    except Exception:
+        if force_refresh:
+            raise
+        return _cache["value"]  # return stale data if available
+
+
+def _fetch_new_daily_stats() -> dict:
     """Authenticate and return today's health snapshot.
 
-    Sleep and HRV are fetched for *yesterday* (Garmin always lags by one day).
-    Steps are fetched for today.
+    Garmin files sleep/HRV under the date you *wake up*, so both are fetched
+    for today (e.g. Monday morning → Monday's entry = Sunday night's sleep).
+    Steps are also fetched for today.
 
     Returns:
         {
@@ -136,12 +162,11 @@ def fetch_daily_stats() -> dict:
     """
     client = get_garmin_client()
     today = date.today().isoformat()
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
 
     return {
         "date": today,
-        "sleep": _fetch_sleep(client, yesterday),
-        "hrv": _fetch_hrv(client, yesterday),
+        "sleep": _fetch_sleep(client, today),
+        "hrv": _fetch_hrv(client, today),
         "steps": _fetch_steps(client, today),
         "last_activity": _fetch_last_activity(client),
         "recent_activities": _fetch_recent_activities(client),
