@@ -148,3 +148,42 @@ def add_coach_note(user_id: str, note: str) -> None:
         "note": note,
     })
     save_profile(user_id, profile)
+
+
+# ---------------------------------------------------------------------------
+# Morning alarm preferences
+# ---------------------------------------------------------------------------
+
+def get_morning_prefs(user_id: str) -> dict:
+    """Return the user's morning alarm preferences.
+
+    Returns a dict with:
+      - "alarm_time": "HH:MM" (Israel time) or "sleep" for Garmin-based trigger.
+                      Defaults to "09:00" if never set.
+      - "sent_date":  "YYYY-MM-DD" of the last day a morning briefing was sent,
+                      or None if never sent.
+    """
+    profile = load_profile(user_id)
+    return {
+        "alarm_time": profile.get("morning_alarm_time", "09:00"),
+        "sent_date": profile.get("morning_sent_date"),
+    }
+
+
+def set_morning_alarm(user_id: str, alarm_time: str) -> None:
+    """Persist the user's preferred morning alarm time.
+
+    Args:
+        alarm_time: "HH:MM" in Israel time (e.g. "07:30") or "sleep" to
+                    trigger automatically when Garmin detects wake-up.
+    """
+    profile = load_profile(user_id)
+    profile["morning_alarm_time"] = alarm_time
+    save_profile(user_id, profile)
+
+
+def mark_morning_sent(user_id: str, date_str: str) -> None:
+    """Record that the morning briefing was already sent on date_str (YYYY-MM-DD)."""
+    profile = load_profile(user_id)
+    profile["morning_sent_date"] = date_str
+    save_profile(user_id, profile)

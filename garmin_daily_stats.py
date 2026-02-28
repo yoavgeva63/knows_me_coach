@@ -38,6 +38,16 @@ def _fetch_sleep(client: Garmin, day: str) -> dict:
     try:
         data = client.get_sleep_data(day)
         daily = data.get("dailySleepDTO", {})
+
+        # sleepEndTimestampLocal is epoch-milliseconds; present only after watch syncs.
+        wake_ts_ms = daily.get("sleepEndTimestampLocal")
+        wake_time_iso = None
+        if wake_ts_ms:
+            from datetime import datetime, timezone
+            wake_time_iso = datetime.fromtimestamp(
+                wake_ts_ms / 1000, tz=timezone.utc
+            ).isoformat()
+
         return {
             "sleep_score": daily.get("sleepScores", {}).get("overall", {}).get("value"),
             "total_sleep_seconds": daily.get("sleepTimeSeconds"),
@@ -45,6 +55,9 @@ def _fetch_sleep(client: Garmin, day: str) -> dict:
             "light_sleep_seconds": daily.get("lightSleepSeconds"),
             "rem_sleep_seconds": daily.get("remSleepSeconds"),
             "awake_seconds": daily.get("awakeSleepSeconds"),
+            # ISO-8601 UTC timestamp of when sleep ended (i.e. wake-up time).
+            # None until the Garmin watch syncs after waking.
+            "wake_time_utc": wake_time_iso,
         }
     except Exception as exc:
         return {"error": str(exc)}

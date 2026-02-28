@@ -7,25 +7,15 @@ For production, the Lambda handler (lambda_handler.py) handles webhook updates i
 import logging
 import os
 import re
-import time
 
-import requests
 from dotenv import load_dotenv
-from garminconnect import GarminConnectAuthenticationError
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 import garmin_daily_stats
 import storage
 from brain import get_claude_response
-from workout_recommender import get_workout_recommendation
-
-_RECOVERY_EMOJI = {
-    "high":      "🟢",
-    "moderate":  "🟡",
-    "low":       "🟠",
-    "very_low":  "🔴",
-}
+from briefing import fetch_weather, md_to_html, send_morning_briefing
 
 load_dotenv()
 
@@ -39,62 +29,6 @@ _PROFILE_PATH = os.path.join(os.path.dirname(__file__), "user_profile.json")
 
 _raw_id = os.environ.get("ALLOWED_TELEGRAM_USER_ID", "")
 ALLOWED_USER_ID = int(_raw_id) if _raw_id.lstrip("-").isdigit() else 0
-
-
-_weather_cache: dict = {"value": "", "expires": 0.0}
-_WEATHER_TTL = 14400  # seconds — refresh at most every 4 hours
-
-
-def fetch_weather() -> str:
-    """Return a one-line weather string for Tel Aviv using Open-Meteo (no API key needed).
-
-    Result is cached for 4 hours so every chat message doesn't hit the API.
-    """
-    if time.monotonic() < _weather_cache["expires"]:
-        return _weather_cache["value"]
-
-    WMO = {
-        0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
-        45: "Foggy", 48: "Icy fog",
-        51: "Light drizzle", 53: "Drizzle", 55: "Heavy drizzle",
-        61: "Light rain", 63: "Rain", 65: "Heavy rain",
-        71: "Light snow", 73: "Snow", 75: "Heavy snow",
-        80: "Rain showers", 81: "Showers", 82: "Heavy showers",
-        95: "Thunderstorm",
-    }
-    try:
-        url = (
-            "https://api.open-meteo.com/v1/forecast"
-            "?latitude=32.0853&longitude=34.7818"
-            "&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m"
-            "&daily=temperature_2m_min,temperature_2m_max"
-            "&timezone=Asia/Jerusalem"
-        )
-        resp = requests.get(url, timeout=8)
-        resp.raise_for_status()
-        data = resp.json()
-        current = data["current"]
-        temp = round(current["temperature_2m"])
-        feels = round(current["apparent_temperature"])
-        wind = round(current["wind_speed_10m"])
-        desc = WMO.get(current["weather_code"], "Unknown")
-        t_min = round(data["daily"]["temperature_2m_min"][0])
-        t_max = round(data["daily"]["temperature_2m_max"][0])
-        result = f"Tel Aviv: {desc}, now {temp}°C (feels like {feels}°C), {t_min}–{t_max}°C today, wind {wind} km/h"
-    except Exception as exc:
-        logger.warning("Weather fetch failed: %s", exc)
-        result = "Weather unavailable"
-
-    _weather_cache["value"] = result
-    _weather_cache["expires"] = time.monotonic() + _WEATHER_TTL
-    return result
-
-
-def _md_to_html(text: str) -> str:
-    """Convert Claude's Markdown to Telegram HTML (bold only)."""
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
-    return text
 
 
 def is_allowed(user_id: int) -> bool:
@@ -145,54 +79,43 @@ async def remember(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Got it, I'll remember that 🧠")
 
 
+async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /settime <HH:MM|sleep> — set the automatic morning alarm."""
+    user_id = update.effective_user.id
+    if not is_allowed(user_id):
+        return
+
+    arg = " ".join(context.args).strip().lower()
+    if arg == "sleep":
+        storage.set_morning_alarm(str(user_id), "sleep")
+        await update.message.reply_text(
+            "Got it! I'll send your morning briefing automatically as soon as "
+            "Garmin detects you've woken up (but no later than 10:00 AM)."
+        )
+    elif re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", arg):
+        storage.set_morning_alarm(str(user_id), arg)
+        await update.message.reply_text(f"Morning alarm set to {arg} (Israel time).")
+    else:
+        await update.message.reply_text(
+            "Usage:\n"
+            "  /settime 07:30  — set a fixed time (Israel time)\n"
+            "  /settime sleep  — trigger when Garmin detects you've woken up"
+        )
+
+
 async def morning(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /morning command — fetch Garmin data and send a personalised briefing."""
     user_id = update.effective_user.id
     if not is_allowed(user_id):
         return
 
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id, action="typing"
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    await send_morning_briefing(
+        context.bot,
+        update.effective_chat.id,
+        str(user_id),
+        profile_fallback_path=_PROFILE_PATH,
     )
-
-    weather = fetch_weather()
-    profile = storage.load_profile(str(user_id), fallback_path=_PROFILE_PATH)
-    history = storage.load_history(str(user_id))
-
-    try:
-        garmin_data = garmin_daily_stats.fetch_daily_stats(force_refresh=True)
-    except GarminConnectAuthenticationError:
-        await update.message.reply_text(
-            "Couldn't connect to Garmin — check your credentials in .env."
-        )
-        return
-    except ValueError as exc:
-        await update.message.reply_text(f"Garmin config error: {exc}")
-        return
-    except Exception as exc:
-        logger.error("Garmin fetch error: %s", exc)
-        await update.message.reply_text(
-            "Had trouble fetching your Garmin data. Please try again in a moment."
-        )
-        return
-
-    try:
-        result = get_workout_recommendation(garmin_data, profile, weather, history)
-    except Exception as exc:
-        logger.error("Workout recommendation error: %s", exc)
-        await update.message.reply_text(
-            "Had trouble generating your recommendation. Please try again in a moment."
-        )
-        return
-
-    emoji = _RECOVERY_EMOJI.get(result["recovery_tier"], "⚪")
-    briefing = f"{emoji} {result['recommendation']}"
-    await update.message.reply_text(_md_to_html(briefing), parse_mode="HTML")
-
-    # Append the morning exchange to history and persist (reuse already-loaded list)
-    history.append({"role": "user", "content": "/morning"})
-    history.append({"role": "assistant", "content": briefing})
-    storage.save_history(str(user_id), history)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -205,9 +128,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_text = update.message.text
     logger.info("Message from %s: %s", user_id, user_text[:80])
 
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id, action="typing"
-    )
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     history = storage.load_history(str(user_id))
     profile = storage.load_profile(str(user_id), fallback_path=_PROFILE_PATH)
@@ -227,7 +148,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     history.append({"role": "assistant", "content": reply})
     storage.save_history(str(user_id), history)
 
-    await update.message.reply_text(_md_to_html(reply), parse_mode="HTML")
+    await update.message.reply_text(md_to_html(reply), parse_mode="HTML")
 
 
 def main() -> None:
@@ -240,6 +161,7 @@ def main() -> None:
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("remember", remember))
     app.add_handler(CommandHandler("morning", morning))
+    app.add_handler(CommandHandler("settime", settime))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Bot starting in polling mode…")
