@@ -14,7 +14,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 import garmin_daily_stats
 import storage
-from brain import get_claude_response
+from brain import get_claude_response, extract_memorable_facts
 from briefing import fetch_weather, md_to_html, send_morning_briefing
 
 load_dotenv()
@@ -146,6 +146,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     history.append({"role": "user", "content": user_text})
     history.append({"role": "assistant", "content": reply})
+
+    # When history hits 40 messages, extract memorable facts from the 10 oldest
+    # before they are trimmed, then keep only the 30 most recent.
+    if len(history) >= 40:
+        messages_to_drop = history[:10]
+        try:
+            extracted = extract_memorable_facts(messages_to_drop, profile.get("coach_notes", []))
+            for fact in extracted:
+                storage.add_coach_note(str(user_id), fact)
+                logger.info("Auto-saved coach note for %s: %s", user_id, fact)
+        except Exception as exc:
+            logger.warning("Fact extraction failed for %s: %s", user_id, exc)
+        history = history[10:]
+
     storage.save_history(str(user_id), history)
 
     await update.message.reply_text(md_to_html(reply), parse_mode="HTML")

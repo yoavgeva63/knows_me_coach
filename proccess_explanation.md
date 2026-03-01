@@ -28,5 +28,20 @@ Stopping the bot:
 Starting the bot:
     sudo systemctl start knows_me_coach
 
-When wanting to run Python commands directly: 
+When wanting to run Python commands directly:
     source venv/bin/activate
+
+**Morning briefing cron (runs every 15 min):**
+View current crontab:
+    crontab -l
+
+To install (first time setup):
+    crontab -e
+    # Add this line:
+    */15 * * * * cd /home/ubuntu/knows_me_coach && /home/ubuntu/knows_me_coach/venv/bin/python morning_check.py >> /home/ubuntu/knows_me_coach/morning_check.log 2>&1
+
+Check morning_check logs:
+    tail -50 /home/ubuntu/knows_me_coach/morning_check.log
+
+Trigger briefing manually:
+    cd /home/ubuntu/knows_me_coach && source venv/bin/activate && python morning_check.py

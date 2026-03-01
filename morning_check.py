@@ -2,7 +2,7 @@
 Morning alarm checker — run every 15 minutes via cron on the Ubuntu server.
 
 Cron entry (edit with: crontab -e):
-    */15 * * * * cd /path/to/project && /path/to/venv/bin/python morning_check.py >> /var/log/morning_check.log 2>&1
+    */15 * * * * cd /home/ubuntu/knows_me_coach && /home/ubuntu/knows_me_coach/venv/bin/python morning_check.py >> /home/ubuntu/knows_me_coach/morning_check.log 2>&1
 
 Alarm fires at the first 15-minute boundary >= the configured time.
 Example: alarm set to 09:00 → fires at 09:00. Set to 09:07 → fires at 09:15.

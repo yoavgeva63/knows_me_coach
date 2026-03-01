@@ -5,6 +5,11 @@ All database interaction is centralized here — no other module touches boto3.
 Tables (names read from env vars, with sensible defaults):
   - fitness_coach_history  : per-user conversation message lists
   - fitness_coach_users    : per-user profile data + coach notes
+
+Caching:
+  - The boto3 resource is a module-level singleton (connection pool reuse).
+  - Loaded profiles are cached in-memory and invalidated on every write,
+    eliminating redundant DynamoDB GETs within the same process lifetime.
 """
 import json
 import logging
@@ -20,25 +25,24 @@ logger = logging.getLogger(__name__)
 HISTORY_TABLE = os.environ.get("DYNAMODB_HISTORY_TABLE", "fitness_coach_history")
 PROFILE_TABLE = os.environ.get("DYNAMODB_USERS_TABLE", "fitness_coach_users")
 
-MAX_MESSAGES = 40
+MAX_MESSAGES = 30
 
+_dynamodb = boto3.resource("dynamodb", region_name=os.environ.get("AWS_REGION", "eu-central-1"))
 
-def _db():
-    """Return a DynamoDB resource using the configured region."""
-    return boto3.resource("dynamodb", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+# In-memory profile cache — invalidated on every save_profile call.
+_profile_cache: dict[str, dict] = {}
 
 
 def ensure_tables() -> None:
     """Create DynamoDB tables if they don't exist. Safe to call on every startup."""
-    db = _db()
     for table_name in (HISTORY_TABLE, PROFILE_TABLE):
         try:
-            db.meta.client.describe_table(TableName=table_name)
+            _dynamodb.meta.client.describe_table(TableName=table_name)
             logger.info("DynamoDB table '%s' already exists.", table_name)
         except ClientError as exc:
             if exc.response["Error"]["Code"] == "ResourceNotFoundException":
                 logger.info("Creating DynamoDB table '%s'...", table_name)
-                table = db.create_table(
+                table = _dynamodb.create_table(
                     TableName=table_name,
                     KeySchema=[{"AttributeName": "user_id", "KeyType": "HASH"}],
                     AttributeDefinitions=[{"AttributeName": "user_id", "AttributeType": "S"}],
@@ -56,7 +60,7 @@ def ensure_tables() -> None:
 
 def load_history(user_id: str) -> list[dict]:
     """Return the conversation message list for a user, or [] if none stored."""
-    table = _db().Table(HISTORY_TABLE)
+    table = _dynamodb.Table(HISTORY_TABLE)
     try:
         resp = table.get_item(Key={"user_id": user_id})
         item = resp.get("Item")
@@ -71,7 +75,7 @@ def save_history(user_id: str, messages: list[dict]) -> None:
     """Persist the message list, trimmed to the last MAX_MESSAGES entries."""
     if len(messages) > MAX_MESSAGES:
         messages = messages[-MAX_MESSAGES:]
-    table = _db().Table(HISTORY_TABLE)
+    table = _dynamodb.Table(HISTORY_TABLE)
     try:
         table.put_item(Item={
             "user_id": user_id,
@@ -84,7 +88,7 @@ def save_history(user_id: str, messages: list[dict]) -> None:
 
 def clear_history(user_id: str) -> None:
     """Delete the stored conversation history for a user."""
-    table = _db().Table(HISTORY_TABLE)
+    table = _dynamodb.Table(HISTORY_TABLE)
     try:
         table.delete_item(Key={"user_id": user_id})
     except Exception as exc:
@@ -96,17 +100,23 @@ def clear_history(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def load_profile(user_id: str, fallback_path: str | None = None) -> dict:
-    """Load the user profile from DynamoDB.
+    """Load the user profile, returning the cached copy if available.
 
-    On first run (no record in DynamoDB), auto-seeds from fallback_path
+    On first call per process, fetches from DynamoDB and caches the result.
+    On first run ever (no record in DynamoDB), auto-seeds from fallback_path
     (user_profile.json) when provided, then persists it to DynamoDB.
     """
-    table = _db().Table(PROFILE_TABLE)
+    if user_id in _profile_cache:
+        return _profile_cache[user_id]
+
+    table = _dynamodb.Table(PROFILE_TABLE)
     try:
         resp = table.get_item(Key={"user_id": user_id})
         item = resp.get("Item")
         if item:
-            return json.loads(item["profile_data"])
+            profile = json.loads(item["profile_data"])
+            _profile_cache[user_id] = profile
+            return profile
     except Exception as exc:
         logger.warning("load_profile failed for %s: %s", user_id, exc)
 
@@ -124,8 +134,9 @@ def load_profile(user_id: str, fallback_path: str | None = None) -> dict:
 
 
 def save_profile(user_id: str, profile: dict) -> None:
-    """Persist the full profile dict to DynamoDB."""
-    table = _db().Table(PROFILE_TABLE)
+    """Persist the full profile dict to DynamoDB and update the in-memory cache."""
+    _profile_cache[user_id] = profile
+    table = _dynamodb.Table(PROFILE_TABLE)
     try:
         table.put_item(Item={
             "user_id": user_id,
