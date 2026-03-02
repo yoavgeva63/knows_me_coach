@@ -172,12 +172,15 @@ Intensity ceiling: {recovery["intensity_ceiling"]} (max RPE {recovery["max_rpe"]
 {weather if weather else "N/A"}
 
 ## Your Task
-Write today's complete workout recommendation for {name}. Be specific:
-- Gym session → exact exercises, sets × reps, RPE per exercise
-- Run → distance, structure (warmup / main set / cooldown), pace guidance via RPE or HR zone
-- Active recovery → exactly what to do and for how long
-Respect the intensity ceiling above. Target ~{session_duration} min total.
-Speak directly to {name}. Concise and actionable — under 220 words."""
+Write today's morning briefing for {name}. Follow this exact structure:
+1. Open with "Good morning {name}!" then one sentence referencing today's sleep and recovery (e.g. "Sleep was solid at 87/100 and your HRV is sitting above baseline — you're ready to push.")
+2. The full workout recommendation. Be specific:
+   - Gym session → exact exercises, sets × reps, RPE per exercise
+   - Run → distance, structure (warmup / main set / cooldown), pace guidance via RPE or HR zone
+   - Active recovery → exactly what to do and for how long
+3. Close with a single motivational sentence tailored to {name}'s goal.
+Respect the intensity ceiling above. Target ~{session_duration} min total. Concise and actionable — under 230 words.
+Do not reference or react to any prior conversation. This is a fresh daily briefing."""
 
     # ── 5. Call Claude ────────────────────────────────────────────────────────
     # Strip internal fields (e.g. ts) — the Anthropic API only accepts role + content.
@@ -189,7 +192,7 @@ Speak directly to {name}. Concise and actionable — under 220 words."""
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=600,
-        system="You are a personal fitness coach. Your job is to write a morning workout recommendation based on the structured data in the user's final message. Use any prior conversation for context (e.g. the user mentioned soreness or travel), but your response must be the workout recommendation only.",
+        system=f"You are a personal fitness coach writing a daily morning briefing. Use prior conversation only for factual context (e.g. the user mentioned soreness or travel) — never reference the conversation itself or react to its tone. Output only the briefing, starting with 'Good morning {name}!'.",
         messages=clean_history + [{"role": "user", "content": prompt}],
     )
 
