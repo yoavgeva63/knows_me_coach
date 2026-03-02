@@ -7,6 +7,7 @@ For production, the Lambda handler (lambda_handler.py) handles webhook updates i
 import logging
 import os
 import re
+from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
 from telegram import Update
@@ -144,20 +145,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    history.append({"role": "user", "content": user_text})
-    history.append({"role": "assistant", "content": reply})
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    history.append({"role": "user", "content": user_text, "ts": today})
+    history.append({"role": "assistant", "content": reply, "ts": today})
 
-    # When history hits 40 messages, extract memorable facts from the 10 oldest
-    # before they are trimmed, then keep only the 30 most recent.
+    # Drop messages older than 7 days (with fact extraction on what's dropped).
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+    stale = [m for m in history if m.get("ts", today) < cutoff]
+    if stale:
+        history = [m for m in history if m.get("ts", today) >= cutoff]
+        try:
+            extracted = extract_memorable_facts(stale, profile.get("coach_notes", []))
+            for fact in extracted:
+                storage.add_coach_note(str(user_id), fact)
+                logger.info("Auto-saved coach note (age-pruned) for %s: %s", user_id, fact)
+        except Exception as exc:
+            logger.warning("Fact extraction (age-pruned) failed for %s: %s", user_id, exc)
+
+    # Fallback: if still over 40 (very active week), extract from oldest 10.
     if len(history) >= 40:
         messages_to_drop = history[:10]
         try:
             extracted = extract_memorable_facts(messages_to_drop, profile.get("coach_notes", []))
             for fact in extracted:
                 storage.add_coach_note(str(user_id), fact)
-                logger.info("Auto-saved coach note for %s: %s", user_id, fact)
+                logger.info("Auto-saved coach note (count-pruned) for %s: %s", user_id, fact)
         except Exception as exc:
-            logger.warning("Fact extraction failed for %s: %s", user_id, exc)
+            logger.warning("Fact extraction (count-pruned) failed for %s: %s", user_id, exc)
         history = history[10:]
 
     storage.save_history(str(user_id), history)

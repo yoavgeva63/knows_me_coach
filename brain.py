@@ -200,7 +200,11 @@ def get_claude_response(
     if garmin_data:
         system += f"\n\nLatest Garmin data:\n{_format_garmin_context(garmin_data)}"
 
-    messages = conversation_history + [{"role": "user", "content": user_message}]
+    raw_messages = conversation_history + [{"role": "user", "content": user_message}]
+    messages = [
+        {"role": m["role"], "content": f"[{m['ts']}] {m['content']}" if "ts" in m else m["content"]}
+        for m in raw_messages
+    ]
 
     response = client.messages.create(
         model="claude-sonnet-4-6",

@@ -12,12 +12,11 @@ Connecting from my local machine:
     ssh -i private-ssh-key.key ubuntu@129.159.141.62
 
 After connecting, deploying updates:
-    cd knows_me_coach
-    git pull
-    sudo systemctl restart knows_me_coach
+    cd knows_me_coach && git pull && sudo systemctl restart knows_me_coach
 
 Checking if bot is running:
     sudo systemctl status knows_me_coach
+    (press 'q' to exit the status mode)
 
 Viewing live logs (for debugging):
     sudo journalctl -u knows_me_coach -f

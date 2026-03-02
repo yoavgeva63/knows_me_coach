@@ -180,12 +180,17 @@ Respect the intensity ceiling above. Target ~{session_duration} min total.
 Speak directly to {name}. Concise and actionable — under 220 words."""
 
     # ── 5. Call Claude ────────────────────────────────────────────────────────
+    # Strip internal fields (e.g. ts) — the Anthropic API only accepts role + content.
+    clean_history = [
+        {"role": m["role"], "content": f"[{m['ts']}] {m['content']}" if "ts" in m else m["content"]}
+        for m in (conversation_history or [])
+    ]
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=600,
         system="You are a personal fitness coach. Your job is to write a morning workout recommendation based on the structured data in the user's final message. Use any prior conversation for context (e.g. the user mentioned soreness or travel), but your response must be the workout recommendation only.",
-        messages=(conversation_history or []) + [{"role": "user", "content": prompt}],
+        messages=clean_history + [{"role": "user", "content": prompt}],
     )
 
     return {

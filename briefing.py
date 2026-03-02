@@ -112,8 +112,9 @@ async def send_morning_briefing(
     briefing = f"{emoji} {result['recommendation']}"
     await bot.send_message(chat_id, md_to_html(briefing), parse_mode="HTML")
 
-    history.append({"role": "user", "content": "/morning"})
-    history.append({"role": "assistant", "content": briefing})
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    history.append({"role": "user", "content": "/morning", "ts": today})
+    history.append({"role": "assistant", "content": briefing, "ts": today})
     storage.save_history(user_id_str, history)
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
