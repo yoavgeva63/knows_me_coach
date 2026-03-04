@@ -156,11 +156,13 @@ async def send_morning_briefing(
     tier = result["recovery_tier"]
     emoji = _RECOVERY_EMOJI.get(tier, "⚪")
     recovery_line = _build_recovery_line(garmin_data, tier)
+    name = profile.get("name", "there")
 
     briefing_text = (
+        f"Good morning {name}! 🌅\n"
         f"{emoji} {recovery_line}\n"
         f"{result['summary']}\n"
-        f"{result['motivation']}"
+        f"💪 {result['motivation']}"
     )
 
     await bot.send_message(

@@ -100,6 +100,7 @@ def _fetch_last_activity(client: Garmin) -> dict:
             "distance_meters": a.get("distance"),
             "avg_hr": a.get("averageHR"),
             "calories": a.get("calories"),
+            "avg_speed_mps": a.get("averageSpeed"),  # metres per second; None for non-GPS activities
         }
     except Exception as exc:
         return {"error": str(exc)}
@@ -118,6 +119,7 @@ def _fetch_recent_activities(client: Garmin, limit: int = 7) -> list:
                 "distance_meters": a.get("distance"),
                 "avg_hr": a.get("averageHR"),
                 "calories": a.get("calories"),
+                "avg_speed_mps": a.get("averageSpeed"),  # metres per second; None for non-GPS activities
             })
         return result
     except Exception as exc:

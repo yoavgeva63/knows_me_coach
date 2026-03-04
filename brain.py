@@ -186,7 +186,7 @@ _WORKOUT_BRIEFING_TOOL = {
             },
             "full_recommendation": {
                 "type": "string",
-                "description": "Full detailed workout text starting with 'Good morning <name>!'",
+                "description": "Full workout detail — starts directly with the workout title, no greeting. Ends with a one-line recovery coaching note.",
             },
         },
         "required": ["summary", "motivation", "full_recommendation"],

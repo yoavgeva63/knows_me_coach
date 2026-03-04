@@ -35,6 +35,22 @@ def _parse_start(start_time_str: str | None) -> datetime | None:
     return None
 
 
+def _format_pace(avg_speed_mps: float | None, distance_meters: float | None, duration_seconds: float | None) -> str | None:
+    """Return average pace as 'M:SS/km', or None if insufficient data.
+
+    Prefers averageSpeed from Garmin; falls back to distance/duration ratio.
+    """
+    speed = avg_speed_mps
+    if not speed and distance_meters and duration_seconds and duration_seconds > 0:
+        speed = distance_meters / duration_seconds
+    if not speed or speed <= 0:
+        return None
+    pace_sec_per_km = 1000 / speed
+    mins = int(pace_sec_per_km // 60)
+    secs = int(pace_sec_per_km % 60)
+    return f"{mins}:{secs:02d}/km"
+
+
 def analyze_week(activities: list) -> dict:
     """
     Summarise the current week's training from a list of recent Garmin activities.
@@ -92,7 +108,9 @@ def analyze_week(activities: list) -> dict:
 
         if act_type in _RUN_TYPES or "run" in act_type:
             km_run += dist_km
-            week_labels.append(f"Run: {dist_km} km ({duration_min} min)")
+            pace_str = _format_pace(act.get("avg_speed_mps"), act.get("distance_meters"), act.get("duration_seconds"))
+            pace_part = f", avg pace {pace_str}" if pace_str else ""
+            week_labels.append(f"Run: {dist_km} km ({duration_min} min{pace_part})")
         elif act_type in _GYM_TYPES:
             gym_sessions += 1
             week_labels.append(f"Gym — {name} ({duration_min} min)")
