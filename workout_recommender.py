@@ -10,11 +10,9 @@ Flow:
 Claude never sees raw HRV numbers — only the tier, its meaning, and constraints.
 """
 
-import os
 from datetime import date
 
-import anthropic
-
+from brain import get_workout_briefing
 from recovery import classify_recovery
 from garmin_activity_analyzer import analyze_week
 
@@ -73,6 +71,7 @@ def _event_blurb(target_event: dict) -> str:
         )
     else:
         return f"Target event: {name} in {days_left} days."
+
 
 
 def get_workout_recommendation(
@@ -172,31 +171,18 @@ Intensity ceiling: {recovery["intensity_ceiling"]} (max RPE {recovery["max_rpe"]
 {weather if weather else "N/A"}
 
 ## Your Task
-Write today's morning briefing for {name}. Follow this exact structure:
-1. Open with "Good morning {name}!" then one sentence referencing today's sleep and recovery (e.g. "Sleep was solid at 87/100 and your HRV is sitting above baseline — you're ready to push.")
-2. The full workout recommendation. Be specific:
-   - Gym session → exact exercises, sets × reps, RPE per exercise
-   - Run → distance, structure (warmup / main set / cooldown), pace guidance via RPE or HR zone
-   - Active recovery → exactly what to do and for how long
-3. Close with a single motivational sentence tailored to {name}'s goal.
-Respect the intensity ceiling above. Target ~{session_duration} min total. Concise and actionable — under 230 words.
-Do not reference or react to any prior conversation. This is a fresh daily briefing."""
+Write today's morning briefing for {name}:
+- summary: one sentence — workout type and RPE (e.g. "Push day — RPE 7, heavy compound work (~60 min)")
+- motivation: one sentence drawing on the athlete's goal or recent context — no fluff
+- full_recommendation: start with "Good morning {name}!" then one sentence on sleep/recovery, then the detailed session plan, then close with a brief coaching cue. Be specific:
+  - Gym session → exact exercises, sets × reps, RPE per exercise
+  - Run → distance, structure (warmup / main set / cooldown), pace guidance via RPE or HR zone
+  - Active recovery → exactly what to do and for how long
+  Respect the intensity ceiling above. Target ~{session_duration} min total. Concise and actionable — under 230 words.
 
-    # ── 5. Call Claude ────────────────────────────────────────────────────────
-    # Strip internal fields (e.g. ts) — the Anthropic API only accepts role + content.
-    clean_history = [
-        {"role": m["role"], "content": f"[{m['ts']}] {m['content']}" if "ts" in m else m["content"]}
-        for m in (conversation_history or [])
-    ]
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=600,
-        system=f"You are a personal fitness coach writing a daily morning briefing. Use prior conversation only for factual context (e.g. the user mentioned soreness or travel) — never reference the conversation itself or react to its tone. Output only the briefing, starting with 'Good morning {name}!'.",
-        messages=clean_history + [{"role": "user", "content": prompt}],
-    )
+Do not reference or react to any prior conversation in summary or motivation. Use prior context only in full_recommendation if directly relevant (e.g. user mentioned soreness)."""
 
-    return {
-        "recommendation": response.content[0].text,
-        "recovery_tier": tier,
-    }
+    # ── 5. Call Claude via brain.py (structured output) ──────────────────────
+    result = get_workout_briefing(prompt, conversation_history)
+
+    return {**result, "recovery_tier": tier}

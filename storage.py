@@ -198,3 +198,32 @@ def mark_morning_sent(user_id: str, date_str: str) -> None:
     profile = load_profile(user_id)
     profile["morning_sent_date"] = date_str
     save_profile(user_id, profile)
+
+
+# ---------------------------------------------------------------------------
+# Daily workout cache
+# ---------------------------------------------------------------------------
+
+def save_daily_workout(user_id: str, workout: dict, date_str: str) -> None:
+    """Cache today's pre-generated workout in the user profile.
+
+    Args:
+        workout:  Dict with keys: summary, motivation, full_recommendation, recovery_tier.
+        date_str: Today's date as YYYY-MM-DD — used to detect staleness tomorrow.
+    """
+    profile = load_profile(user_id)
+    profile["daily_workout"] = {"date": date_str, **workout}
+    save_profile(user_id, profile)
+
+
+def load_daily_workout(user_id: str, date_str: str) -> dict | None:
+    """Return today's cached workout, or None if not generated yet or from a previous day.
+
+    Args:
+        date_str: Today's date as YYYY-MM-DD.
+    """
+    profile = load_profile(user_id)
+    cached = profile.get("daily_workout")
+    if cached and cached.get("date") == date_str:
+        return cached
+    return None

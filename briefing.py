@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 import requests
 from garminconnect import GarminConnectAuthenticationError
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 import garmin_daily_stats
 import storage
@@ -23,6 +23,24 @@ _RECOVERY_EMOJI = {
     "low":      "🟠",
     "very_low": "🔴",
 }
+
+_RECOVERY_LABEL = {
+    "high":     "Recovery looks solid today",
+    "moderate": "Recovery is decent today",
+    "low":      "Recovery is a bit low today",
+    "very_low": "Recovery is very low today",
+}
+
+_BRIEFING_KEYBOARD = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("💪 Workout",   callback_data="action:workout"),
+        InlineKeyboardButton("🥗 Nutrition", callback_data="action:nutrition"),
+    ],
+    [
+        InlineKeyboardButton("😴 Sleep",     callback_data="action:sleep"),
+        InlineKeyboardButton("💧 Hydration", callback_data="action:hydration"),
+    ],
+])
 
 _weather_cache: dict = {"value": "", "expires": 0.0}
 _WEATHER_TTL = 14400  # 4 hours
@@ -77,16 +95,41 @@ def md_to_html(text: str) -> str:
     return text
 
 
+def _build_recovery_line(garmin_data: dict, tier: str) -> str:
+    """Build the one-line recovery summary shown in the briefing header."""
+    sleep = garmin_data.get("sleep", {})
+    hrv = garmin_data.get("hrv", {})
+    sleep_score = sleep.get("sleep_score")
+    hrv_last = hrv.get("last_night_avg")
+    hrv_avg = hrv.get("weekly_avg")
+
+    label = _RECOVERY_LABEL.get(tier, "Recovery status unknown")
+    parts = []
+    if sleep_score is not None:
+        parts.append(f"sleep at {sleep_score}/100")
+    if hrv_last is not None and hrv_avg is not None:
+        direction = "above" if hrv_last >= hrv_avg else "below"
+        parts.append(f"HRV {direction} baseline")
+
+    detail = " — " + ", ".join(parts) if parts else ""
+    return f"{label}{detail}."
+
+
 async def send_morning_briefing(
     bot: Bot,
     chat_id: int,
     user_id_str: str,
     profile_fallback_path: str | None = None,
 ) -> None:
-    """Fetch Garmin data, build the morning briefing, send it, and persist history.
+    """Generate the full workout recommendation, cache it, and send the morning briefing.
 
-    Marks today as sent in storage on success. Callers do not need to do this.
+    The briefing message shows a short recovery line, workout summary, and motivational
+    sentence — with inline buttons for each topic. The full workout detail is cached in
+    DynamoDB so the Workout button can serve it instantly without a second Claude call.
+
+    Marks today as sent in storage on success.
     """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     weather = fetch_weather()
     profile = storage.load_profile(user_id_str, fallback_path=profile_fallback_path)
     history = storage.load_history(user_id_str)
@@ -108,15 +151,28 @@ async def send_morning_briefing(
         await bot.send_message(chat_id, "Had trouble generating your recommendation. Try again in a moment.")
         return
 
-    emoji = _RECOVERY_EMOJI.get(result["recovery_tier"], "⚪")
-    briefing = f"{emoji} {result['recommendation']}"
-    await bot.send_message(chat_id, md_to_html(briefing), parse_mode="HTML")
+    storage.save_daily_workout(user_id_str, result, today)
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    tier = result["recovery_tier"]
+    emoji = _RECOVERY_EMOJI.get(tier, "⚪")
+    recovery_line = _build_recovery_line(garmin_data, tier)
+
+    briefing_text = (
+        f"{emoji} {recovery_line}\n"
+        f"{result['summary']}\n"
+        f"{result['motivation']}"
+    )
+
+    await bot.send_message(
+        chat_id,
+        md_to_html(briefing_text),
+        parse_mode="HTML",
+        reply_markup=_BRIEFING_KEYBOARD,
+    )
+
     history.append({"role": "user", "content": "/morning", "ts": today})
-    history.append({"role": "assistant", "content": briefing, "ts": today})
+    history.append({"role": "assistant", "content": briefing_text, "ts": today})
     storage.save_history(user_id_str, history)
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     storage.mark_morning_sent(user_id_str, today)
     logger.info("Morning briefing sent and marked for %s.", today)

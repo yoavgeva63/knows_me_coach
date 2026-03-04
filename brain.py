@@ -170,6 +170,63 @@ Keep each fact under 15 words. Maximum 3 facts."""
     return facts[:3]
 
 
+_WORKOUT_BRIEFING_TOOL = {
+    "name": "workout_briefing",
+    "description": "Return the structured morning workout briefing.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "summary": {
+                "type": "string",
+                "description": "One sentence: workout type and RPE",
+            },
+            "motivation": {
+                "type": "string",
+                "description": "One motivational sentence tied to the athlete's goal or recent context",
+            },
+            "full_recommendation": {
+                "type": "string",
+                "description": "Full detailed workout text starting with 'Good morning <name>!'",
+            },
+        },
+        "required": ["summary", "motivation", "full_recommendation"],
+    },
+}
+
+
+def _clean_history(conversation_history: list[dict]) -> list[dict]:
+    """Strip internal fields (e.g. ts) — the Anthropic API only accepts role + content."""
+    return [
+        {"role": m["role"], "content": f"[{m['ts']}] {m['content']}" if "ts" in m else m["content"]}
+        for m in conversation_history
+    ]
+
+
+def get_workout_briefing(
+    prompt: str,
+    conversation_history: list[dict] | None = None,
+) -> dict:
+    """Call Claude with forced tool use to get a structured workout briefing.
+
+    Args:
+        prompt:               The fully-assembled workout context prompt.
+        conversation_history: Prior conversation messages for context.
+
+    Returns:
+        Dict with keys: summary, motivation, full_recommendation.
+    """
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=700,
+        system="You are a personal fitness coach writing a daily morning briefing.",
+        tools=[_WORKOUT_BRIEFING_TOOL],
+        tool_choice={"type": "tool", "name": "workout_briefing"},
+        messages=_clean_history(conversation_history or []) + [{"role": "user", "content": prompt}],
+    )
+    return response.content[0].input  # guaranteed dict matching the schema
+
+
 def get_claude_response(
     conversation_history: list[dict],
     user_message: str,
@@ -200,11 +257,7 @@ def get_claude_response(
     if garmin_data:
         system += f"\n\nLatest Garmin data:\n{_format_garmin_context(garmin_data)}"
 
-    raw_messages = conversation_history + [{"role": "user", "content": user_message}]
-    messages = [
-        {"role": m["role"], "content": f"[{m['ts']}] {m['content']}" if "ts" in m else m["content"]}
-        for m in raw_messages
-    ]
+    messages = _clean_history(conversation_history + [{"role": "user", "content": user_message}])
 
     response = client.messages.create(
         model="claude-sonnet-4-6",

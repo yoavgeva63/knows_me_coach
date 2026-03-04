@@ -11,12 +11,13 @@ from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 import garmin_daily_stats
 import storage
 from brain import get_claude_response, extract_memorable_facts
 from briefing import fetch_weather, md_to_html, send_morning_briefing
+from profile_wizard import build_wizard_handler
 
 load_dotenv()
 
@@ -39,21 +40,9 @@ def is_allowed(user_id: int) -> bool:
     return user_id == ALLOWED_USER_ID
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /start command."""
-    user_id = update.effective_user.id
-    if not is_allowed(user_id):
-        return
-
-    storage.clear_history(str(user_id))
-    await update.message.reply_text(
-        "Hey! I'm your personal fitness coach 💪\n\n"
-        "Tell me about your fitness goals, ask for a workout plan, log a meal, "
-        "or just chat about your health. I'm here to help!\n\n"
-        "Use /clear to reset our conversation anytime.\n"
-        "Use /remember <fact> to store something I should always know about you."
-    )
-
+# ---------------------------------------------------------------------------
+# Command handlers
+# ---------------------------------------------------------------------------
 
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /clear command — wipes conversation history."""
@@ -179,17 +168,54 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(md_to_html(reply), parse_mode="HTML")
 
 
+async def handle_briefing_action(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle inline keyboard button taps from the morning briefing."""
+    query = update.callback_query
+    user_id = query.from_user.id
+    if not is_allowed(user_id):
+        await query.answer()
+        return
+
+    await query.answer()
+    action = query.data.split(":")[1] if ":" in query.data else query.data
+
+    if action == "workout":
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        cached = storage.load_daily_workout(str(user_id), today)
+        if cached:
+            full_text = cached["full_recommendation"]
+        else:
+            await query.message.reply_text("No workout cached for today — send /morning to generate one.")
+            return
+        await query.message.reply_text(md_to_html(full_text), parse_mode="HTML")
+
+    elif action == "nutrition":
+        await query.message.reply_text("🥗 Nutrition planning coming soon!")
+
+    elif action == "sleep":
+        await query.message.reply_text("😴 Sleep insights coming soon!")
+
+    elif action == "hydration":
+        await query.message.reply_text("💧 Hydration tracking coming soon!")
+
+
+# ---------------------------------------------------------------------------
+# App entry point
+# ---------------------------------------------------------------------------
+
 def main() -> None:
+    """Build and start the bot."""
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     app = Application.builder().token(token).build()
 
     storage.ensure_tables()
 
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(build_wizard_handler())
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("remember", remember))
     app.add_handler(CommandHandler("morning", morning))
     app.add_handler(CommandHandler("settime", settime))
+    app.add_handler(CallbackQueryHandler(handle_briefing_action, pattern=r"^action:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Bot starting in polling mode…")
