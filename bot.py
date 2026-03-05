@@ -180,10 +180,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_text = update.message.text
     logger.info("Message from %s: %s", user_id, user_text[:80])
 
+    profile = storage.load_profile(str(user_id))
+    if not profile:
+        await update.message.reply_text("Welcome! Please run /start to set up your profile first.")
+        return
+
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     history = storage.load_history(str(user_id))
-    profile = storage.load_profile(str(user_id))
     weather = fetch_weather()
     garmin_data = garmin_daily_stats.fetch_daily_stats(str(user_id))
 
