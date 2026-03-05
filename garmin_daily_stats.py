@@ -1,32 +1,75 @@
 """
 Garmin Connect data-fetching module.
-Public API: fetch_daily_stats(force_refresh=False)
+
+Auth model: credentials are stored per-user in DynamoDB as garth OAuth tokens
+(JSON string). Call initial_login(user_id, email, password) once to authenticate
+and persist the tokens. Subsequent calls use the stored tokens.
+
+Public API:
+  - initial_login(user_id, email, password)  — first-time auth, saves tokens
+  - fetch_daily_stats(user_id, force_refresh) — today's health snapshot
 """
 
-import os
+import logging
 import time
 from datetime import date
 
-from dotenv import load_dotenv
 from garminconnect import Garmin, GarminConnectAuthenticationError
 
-load_dotenv()
+import storage
+
+logger = logging.getLogger(__name__)
 
 
-def get_garmin_client() -> Garmin:
-    """Authenticate and return a Garmin client.
+# ---------------------------------------------------------------------------
+# Auth helpers
+# ---------------------------------------------------------------------------
+
+def get_garmin_client(user_id: str) -> Garmin:
+    """Return an authenticated Garmin client by restoring stored OAuth tokens.
+
+    Args:
+        user_id: Telegram user ID string.
 
     Raises:
-        ValueError: if credentials are missing from the environment.
-        GarminConnectAuthenticationError: if login fails.
+        GarminConnectAuthenticationError: if no tokens are stored or they are invalid.
     """
-    email = os.getenv("GARMIN_EMAIL")
-    password = os.getenv("GARMIN_PASSWORD")
-    if not email or not password:
-        raise ValueError("GARMIN_EMAIL and GARMIN_PASSWORD must be set in .env")
+    tokens_json = storage.load_garmin_tokens(user_id)
+    if not tokens_json:
+        raise GarminConnectAuthenticationError(
+            f"No Garmin credentials for user {user_id} — run /connect_garmin"
+        )
+    client = Garmin()
+    client.garth.loads(tokens_json)
+    return client
+
+
+def initial_login(user_id: str, email: str, password: str) -> None:
+    """Authenticate with email + password, then persist the OAuth tokens.
+
+    This is called once from the /connect_garmin wizard. After this, all
+    subsequent calls use the saved tokens via get_garmin_client().
+
+    Args:
+        user_id:  Telegram user ID string.
+        email:    Garmin Connect account email.
+        password: Garmin Connect account password (not persisted).
+
+    Raises:
+        GarminConnectAuthenticationError: on bad credentials.
+    """
     client = Garmin(email, password)
     client.login()
-    return client
+    storage.save_garmin_tokens(user_id, client.garth.dumps())
+    logger.info("Garmin tokens saved for user %s.", user_id)
+
+
+def _refresh_tokens(user_id: str, client: Garmin) -> None:
+    """Silently persist tokens after a successful API call (garth may have refreshed them)."""
+    try:
+        storage.save_garmin_tokens(user_id, client.garth.dumps())
+    except Exception as exc:
+        logger.warning("Failed to refresh Garmin tokens for %s: %s", user_id, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +143,7 @@ def _fetch_last_activity(client: Garmin) -> dict:
             "distance_meters": a.get("distance"),
             "avg_hr": a.get("averageHR"),
             "calories": a.get("calories"),
-            "avg_speed_mps": a.get("averageSpeed"),  # metres per second; None for non-GPS activities
+            "avg_speed_mps": a.get("averageSpeed"),  # metres per second; None for non-GPS
         }
     except Exception as exc:
         return {"error": str(exc)}
@@ -119,10 +162,10 @@ def _fetch_recent_activities(client: Garmin, limit: int = 7) -> list:
                 "distance_meters": a.get("distance"),
                 "avg_hr": a.get("averageHR"),
                 "calories": a.get("calories"),
-                "avg_speed_mps": a.get("averageSpeed"),  # metres per second; None for non-GPS activities
+                "avg_speed_mps": a.get("averageSpeed"),
             })
         return result
-    except Exception as exc:
+    except Exception:
         return []
 
 
@@ -130,37 +173,38 @@ def _fetch_recent_activities(client: Garmin, limit: int = 7) -> list:
 # Public API
 # ---------------------------------------------------------------------------
 
-_cache: dict = {"value": None, "expires": 0.0}
+# Per-user cache: user_id -> {"value": dict | None, "expires": float}
+_cache: dict[str, dict] = {}
 _CACHE_TTL = 7200  # seconds — refresh at most every two hours
 
 
-def fetch_daily_stats(force_refresh: bool = False) -> dict | None:
-    """Return Garmin daily stats, using an in-memory cache by default.
+def fetch_daily_stats(user_id: str, force_refresh: bool = False) -> dict | None:
+    """Return Garmin daily stats for a user, using an in-memory cache by default.
 
     Args:
+        user_id:       Telegram user ID string.
         force_refresh: When True, bypass the cache and always fetch from Garmin.
                        Exceptions are re-raised so the caller can report them.
                        When False (default), silently falls back to stale data on error.
     """
-    if not force_refresh and time.monotonic() < _cache["expires"] and _cache["value"]:
-        return _cache["value"]
+    user_cache = _cache.get(user_id, {"value": None, "expires": 0.0})
+    if not force_refresh and time.monotonic() < user_cache["expires"] and user_cache["value"]:
+        return user_cache["value"]
     try:
-        data = _fetch_new_daily_stats()
-        _cache["value"] = data
-        _cache["expires"] = time.monotonic() + _CACHE_TTL
+        data = _fetch_new_daily_stats(user_id)
+        _cache[user_id] = {"value": data, "expires": time.monotonic() + _CACHE_TTL}
         return data
     except Exception:
         if force_refresh:
             raise
-        return _cache["value"]  # return stale data if available
+        return user_cache.get("value")  # return stale data if available
 
 
-def _fetch_new_daily_stats() -> dict:
-    """Authenticate and return today's health snapshot.
+def _fetch_new_daily_stats(user_id: str) -> dict:
+    """Authenticate and return today's health snapshot for the given user.
 
     Garmin files sleep/HRV under the date you *wake up*, so both are fetched
     for today (e.g. Monday morning → Monday's entry = Sunday night's sleep).
-    Steps are also fetched for today.
 
     Returns:
         {
@@ -168,17 +212,17 @@ def _fetch_new_daily_stats() -> dict:
             "sleep": {...},
             "hrv":   {...},
             "steps": {...},
-            "last_activity": {...},
+            "last_activity":      {...},
+            "recent_activities":  [...],
         }
 
     Raises:
-        GarminConnectAuthenticationError: on bad credentials.
-        ValueError: if credentials are missing.
+        GarminConnectAuthenticationError: on missing or invalid tokens.
     """
-    client = get_garmin_client()
+    client = get_garmin_client(user_id)
     today = date.today().isoformat()
 
-    return {
+    result = {
         "date": today,
         "sleep": _fetch_sleep(client, today),
         "hrv": _fetch_hrv(client, today),
@@ -186,3 +230,7 @@ def _fetch_new_daily_stats() -> dict:
         "last_activity": _fetch_last_activity(client),
         "recent_activities": _fetch_recent_activities(client),
     }
+
+    # Persist tokens in case garth silently refreshed them during the requests.
+    _refresh_tokens(user_id, client)
+    return result

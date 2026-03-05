@@ -1,6 +1,9 @@
 """
 Morning alarm checker — run every 15 minutes via cron on the Ubuntu server.
 
+Iterates all users in DynamoDB and sends each one their morning briefing when
+their configured alarm time is reached (or when Garmin detects a wake-up).
+
 Cron entry (edit with: crontab -e):
     */15 * * * * cd /home/ubuntu/knows_me_coach && /home/ubuntu/knows_me_coach/venv/bin/python morning_check.py >> /home/ubuntu/knows_me_coach/morning_check.log 2>&1
 
@@ -28,27 +31,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _ISRAEL_UTC_OFFSET_H = 2
-_SLEEP_MODE_FALLBACK = "10:00"
+_SLEEP_MODE_FALLBACK = "9:30"
 
 
-async def main() -> None:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    user_id_str = os.environ.get("ALLOWED_TELEGRAM_USER_ID", "")
-    if not token or not user_id_str:
-        logger.error("TELEGRAM_BOT_TOKEN and ALLOWED_TELEGRAM_USER_ID must be set in .env")
-        return
-
-    chat_id = int(user_id_str)
-
-    now_utc = datetime.now(timezone.utc)
-    now_israel = now_utc + timedelta(hours=_ISRAEL_UTC_OFFSET_H)
-    today_israel = now_israel.strftime("%Y-%m-%d")
-    now_hhmm = now_israel.strftime("%H:%M")
-
+async def _check_and_send(
+    bot: Bot,
+    user_id_str: str,
+    now_utc: datetime,
+    today_israel: str,
+    now_hhmm: str,
+) -> None:
+    """Check alarm conditions for one user and send the briefing if due."""
     prefs = storage.get_morning_prefs(user_id_str)
 
     if prefs["sent_date"] == today_israel:
-        logger.info("Already sent today (%s), skipping.", today_israel)
+        logger.info("Already sent today for user %s, skipping.", user_id_str)
         return
 
     alarm_time = prefs["alarm_time"]  # "HH:MM" or "sleep"
@@ -56,30 +53,56 @@ async def main() -> None:
 
     if alarm_time == "sleep":
         try:
-            garmin_data = garmin_daily_stats.fetch_daily_stats(force_refresh=True)
+            garmin_data = garmin_daily_stats.fetch_daily_stats(user_id_str, force_refresh=True)
             wake_utc_str = (garmin_data or {}).get("sleep", {}).get("wake_time_utc")
             if wake_utc_str:
                 wake_utc = datetime.fromisoformat(wake_utc_str)
                 wake_israel = wake_utc + timedelta(hours=_ISRAEL_UTC_OFFSET_H)
                 if wake_israel.strftime("%Y-%m-%d") == today_israel and now_utc >= wake_utc:
-                    logger.info("Garmin wake time detected at %s (Israel), sending.", wake_israel.strftime("%H:%M"))
+                    logger.info(
+                        "Garmin wake detected for %s at %s (Israel).",
+                        user_id_str, wake_israel.strftime("%H:%M"),
+                    )
                     should_send = True
             if not should_send and now_hhmm >= _SLEEP_MODE_FALLBACK:
-                logger.info("Sleep mode fallback reached (%s), sending.", _SLEEP_MODE_FALLBACK)
+                logger.info("Sleep mode fallback reached for %s (%s).", user_id_str, now_hhmm)
                 should_send = True
         except Exception as exc:
-            logger.error("Garmin fetch failed during sleep check: %s", exc)
+            logger.error("Garmin fetch failed for %s: %s", user_id_str, exc)
             if now_hhmm >= _SLEEP_MODE_FALLBACK:
                 should_send = True
     else:
         if now_hhmm >= alarm_time:
-            logger.info("Alarm time %s reached (now %s), sending.", alarm_time, now_hhmm)
+            logger.info("Alarm time %s reached for user %s (now %s).", alarm_time, user_id_str, now_hhmm)
             should_send = True
 
     if should_send:
-        profile_path = os.path.join(os.path.dirname(__file__), "user_profile.json")
-        bot = Bot(token=token)
-        await send_morning_briefing(bot, chat_id, user_id_str, profile_fallback_path=profile_path)
+        await send_morning_briefing(bot, int(user_id_str), user_id_str)
+
+
+async def main() -> None:
+    """Check all users and send morning briefings where conditions are met."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not token:
+        logger.error("TELEGRAM_BOT_TOKEN must be set in .env")
+        return
+
+    all_user_ids = storage.list_all_user_ids()
+    if not all_user_ids:
+        logger.info("No users found in database.")
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    now_israel = now_utc + timedelta(hours=_ISRAEL_UTC_OFFSET_H)
+    today_israel = now_israel.strftime("%Y-%m-%d")
+    now_hhmm = now_israel.strftime("%H:%M")
+
+    bot = Bot(token=token)
+    for user_id_str in all_user_ids:
+        try:
+            await _check_and_send(bot, user_id_str, now_utc, today_israel, now_hhmm)
+        except Exception as exc:
+            logger.error("Unexpected error for user %s: %s", user_id_str, exc)
 
 
 if __name__ == "__main__":

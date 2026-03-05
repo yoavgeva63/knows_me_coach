@@ -37,6 +37,26 @@ def _fmt_seconds(s) -> str:
     return f"{h}h {m}m"
 
 
+def _fmt_last_workout(activity: dict) -> str:
+    """Format the last workout line."""
+    base = (
+        f"Last workout: {activity.get('name', 'N/A')} ({activity.get('type', 'N/A')}) "
+        f"on {activity.get('start_time', 'N/A')}, "
+        f"duration {_fmt_seconds(activity.get('duration_seconds'))}, "
+        f"avg HR {activity.get('avg_hr', 'N/A')} bpm"
+    )
+    dist_m = activity.get("distance_meters")
+    speed_mps = activity.get("avg_speed_mps")
+    if dist_m:
+        base += f", distance {round(dist_m / 1000, 2)} km"
+    if speed_mps:
+        pace_sec_per_km = 1000 / speed_mps
+        pace_min = int(pace_sec_per_km // 60)
+        pace_sec = int(pace_sec_per_km % 60)
+        base += f", pace {pace_min}:{pace_sec:02d} min/km"
+    return base
+
+
 def _format_garmin_context(garmin_data: dict) -> str:
     sleep = garmin_data.get("sleep", {})
     hrv = garmin_data.get("hrv", {})
@@ -52,10 +72,7 @@ def _format_garmin_context(garmin_data: dict) -> str:
         f"REM: {_fmt_seconds(sleep.get('rem_sleep_seconds'))}",
         f"HRV: {hrv.get('last_night_avg', 'N/A')} ms (weekly avg {hrv.get('weekly_avg', 'N/A')} ms, status: {hrv.get('status', 'N/A')})",
         f"Steps today: {steps.get('total_steps', 'N/A')}",
-        f"Last workout: {activity.get('name', 'N/A')} ({activity.get('type', 'N/A')}) "
-        f"on {activity.get('start_time', 'N/A')}, "
-        f"duration {_fmt_seconds(activity.get('duration_seconds'))}, "
-        f"avg HR {activity.get('avg_hr', 'N/A')} bpm",
+        _fmt_last_workout(activity),
     ]
 
     if recent:
@@ -195,11 +212,22 @@ _WORKOUT_BRIEFING_TOOL = {
 
 
 def _clean_history(conversation_history: list[dict]) -> list[dict]:
-    """Strip internal fields (e.g. ts) — the Anthropic API only accepts role + content."""
-    return [
-        {"role": m["role"], "content": f"[{m['ts']}] {m['content']}" if "ts" in m else m["content"]}
-        for m in conversation_history
-    ]
+    """Prepare history for the Anthropic API (role + content only).
+
+    User messages are prefixed with their date so Claude can judge temporal relevance.
+    Assistant messages are left as-is — stamping them would cause Claude to mimic the
+    [YYYY-MM-DD] format in its own replies.
+    Old messages without a ts field (pre-feature) are passed through unchanged.
+    """
+    result = []
+    for m in conversation_history:
+        ts = m.get("ts")
+        if m["role"] == "user" and ts:
+            content = f"[{ts}] {m['content']}"
+        else:
+            content = m["content"]
+        result.append({"role": m["role"], "content": content})
+    return result
 
 
 def get_workout_briefing(

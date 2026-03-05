@@ -10,11 +10,21 @@ import re
 from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
+from garminconnect import GarminConnectAuthenticationError
 from telegram import Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ConversationHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 import garmin_daily_stats
 import storage
+from auth import is_allowed
 from brain import get_claude_response, extract_memorable_facts
 from briefing import fetch_weather, md_to_html, send_morning_briefing
 from profile_wizard import build_wizard_handler
@@ -27,17 +37,74 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_PROFILE_PATH = os.path.join(os.path.dirname(__file__), "user_profile.json")
+# ---------------------------------------------------------------------------
+# /connect_garmin mini wizard — 2 states
+# ---------------------------------------------------------------------------
 
-_raw_id = os.environ.get("ALLOWED_TELEGRAM_USER_ID", "")
-ALLOWED_USER_ID = int(_raw_id) if _raw_id.lstrip("-").isdigit() else 0
+_GARMIN_EMAIL, _GARMIN_PASSWORD = range(2)
 
 
-def is_allowed(user_id: int) -> bool:
-    """Only respond to the configured user (yourself)."""
-    if ALLOWED_USER_ID == 0:
-        return True  # No restriction configured — allow all (dev mode)
-    return user_id == ALLOWED_USER_ID
+async def _connect_garmin_start(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle /connect_garmin — start the Garmin credentials wizard."""
+    if not is_allowed(update.effective_user.id):
+        return ConversationHandler.END
+    await update.message.reply_text("What's your Garmin Connect email address?")
+    return _GARMIN_EMAIL
+
+
+async def _connect_garmin_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Collect the Garmin email and ask for the password."""
+    context.user_data["garmin_email"] = update.message.text.strip()
+    await update.message.reply_text(
+        "Now enter your Garmin Connect password.\n"
+        "⚠️ Your message will be visible in chat — delete it after sending."
+    )
+    return _GARMIN_PASSWORD
+
+
+async def _connect_garmin_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Collect the password, authenticate, and persist the tokens."""
+    user_id = update.effective_user.id
+    email = context.user_data.pop("garmin_email", "")
+    password = update.message.text.strip()
+    context.user_data.clear()
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    try:
+        garmin_daily_stats.initial_login(str(user_id), email, password)
+    except GarminConnectAuthenticationError:
+        await update.message.reply_text(
+            "Authentication failed — double-check your email and password and try /connect_garmin again."
+        )
+        return ConversationHandler.END
+    except Exception as exc:
+        logger.error("Garmin connect error for %s: %s", user_id, exc)
+        await update.message.reply_text("Something went wrong connecting to Garmin. Try again later.")
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "Garmin Connect linked! Your morning briefings will now include live health data."
+    )
+    return ConversationHandler.END
+
+
+async def _connect_garmin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle /cancel inside the connect_garmin wizard."""
+    context.user_data.clear()
+    await update.message.reply_text("Garmin connection cancelled.")
+    return ConversationHandler.END
+
+
+def _build_garmin_connect_handler() -> ConversationHandler:
+    """Return the ConversationHandler for the /connect_garmin mini wizard."""
+    return ConversationHandler(
+        entry_points=[CommandHandler("connect_garmin", _connect_garmin_start)],
+        states={
+            _GARMIN_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, _connect_garmin_email)],
+            _GARMIN_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, _connect_garmin_password)],
+        },
+        fallbacks=[CommandHandler("cancel", _connect_garmin_cancel)],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -100,12 +167,7 @@ async def morning(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    await send_morning_briefing(
-        context.bot,
-        update.effective_chat.id,
-        str(user_id),
-        profile_fallback_path=_PROFILE_PATH,
-    )
+    await send_morning_briefing(context.bot, update.effective_chat.id, str(user_id))
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -121,9 +183,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     history = storage.load_history(str(user_id))
-    profile = storage.load_profile(str(user_id), fallback_path=_PROFILE_PATH)
+    profile = storage.load_profile(str(user_id))
     weather = fetch_weather()
-    garmin_data = garmin_daily_stats.fetch_daily_stats()
+    garmin_data = garmin_daily_stats.fetch_daily_stats(str(user_id))
 
     try:
         reply = get_claude_response(history, user_text, weather, garmin_data, profile)
@@ -211,6 +273,7 @@ def main() -> None:
     storage.ensure_tables()
 
     app.add_handler(build_wizard_handler())
+    app.add_handler(_build_garmin_connect_handler())
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("remember", remember))
     app.add_handler(CommandHandler("morning", morning))

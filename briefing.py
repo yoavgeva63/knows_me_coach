@@ -119,7 +119,6 @@ async def send_morning_briefing(
     bot: Bot,
     chat_id: int,
     user_id_str: str,
-    profile_fallback_path: str | None = None,
 ) -> None:
     """Generate the full workout recommendation, cache it, and send the morning briefing.
 
@@ -131,13 +130,13 @@ async def send_morning_briefing(
     """
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     weather = fetch_weather()
-    profile = storage.load_profile(user_id_str, fallback_path=profile_fallback_path)
+    profile = storage.load_profile(user_id_str)
     history = storage.load_history(user_id_str)
 
     try:
-        garmin_data = garmin_daily_stats.fetch_daily_stats(force_refresh=True)
+        garmin_data = garmin_daily_stats.fetch_daily_stats(user_id_str, force_refresh=True)
     except GarminConnectAuthenticationError:
-        await bot.send_message(chat_id, "Couldn't connect to Garmin — check your credentials.")
+        await bot.send_message(chat_id, "Couldn't connect to Garmin — run /connect_garmin to link your account.")
         return
     except Exception as exc:
         logger.error("Garmin fetch error: %s", exc)

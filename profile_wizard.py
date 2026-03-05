@@ -1,7 +1,7 @@
 """
 Profile setup wizard for the fitness coach bot.
 
-Implements a sequential ConversationHandler that collects (or updates) the 8
+Implements a sequential ConversationHandler that collects (or updates) the 9
 required profile fields.  Two entry points:
   - /start  : skips fields that are already filled in DynamoDB
   - /profile: asks every field so the user can update anything
@@ -10,7 +10,6 @@ Call build_wizard_handler() to get the configured ConversationHandler to registe
 with the PTB Application.
 """
 import logging
-import os
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -23,26 +22,18 @@ from telegram.ext import (
 )
 
 import storage
+from auth import is_allowed as _is_allowed
 
 logger = logging.getLogger(__name__)
 
-_raw_id = os.environ.get("ALLOWED_TELEGRAM_USER_ID", "")
-_ALLOWED_USER_ID = int(_raw_id) if _raw_id.lstrip("-").isdigit() else 0
-
-
-def _is_allowed(user_id: int) -> bool:
-    """Return True if user_id is the configured bot owner (mirrors bot.is_allowed)."""
-    return _ALLOWED_USER_ID == 0 or user_id == _ALLOWED_USER_ID
-
-
-_PROFILE_PATH = os.path.join(os.path.dirname(__file__), "user_profile.json")
 
 COMMANDS_HELP = (
     "/morning — daily briefing\n"
     "/clear — reset conversation\n"
     "/remember <fact> — store a note\n"
     "/settime <HH:MM|sleep> — morning alarm\n"
-    "/profile — update your profile"
+    "/profile — update your profile\n"
+    "/connect_garmin — link or relink your Garmin account"
 )
 
 # ---------------------------------------------------------------------------
@@ -58,7 +49,8 @@ COMMANDS_HELP = (
     WIZARD_WEEKLY_DAYS,
     WIZARD_SESSION_DURATION,
     WIZARD_DIETARY,
-) = range(8)
+    WIZARD_GARMIN,
+) = range(9)
 
 # Ordered list of (profile_key, wizard_state) — defines both field order and
 # the mapping used by _advance() to skip already-filled fields.
@@ -71,6 +63,7 @@ _FIELD_STATES: list[tuple[str, int]] = [
     ("weekly_training_days", WIZARD_WEEKLY_DAYS),
     ("preferred_session_duration_minutes", WIZARD_SESSION_DURATION),
     ("dietary_restrictions", WIZARD_DIETARY),
+    ("garmin_asked", WIZARD_GARMIN),
 ]
 
 # ---------------------------------------------------------------------------
@@ -116,9 +109,14 @@ async def _finish_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     profile = context.user_data["profile"]
     storage.save_profile(uid, profile)
     name = profile.get("name", "there")
+
+    garmin_note = ""
+    if context.user_data.get("wants_garmin") and not storage.load_garmin_tokens(uid):
+        garmin_note = "\n\nRun /connect_garmin to link your Garmin device and unlock live recovery data in your morning briefing."
+
     await context.bot.send_message(
         update.effective_chat.id,
-        f"All set, {name}! Your profile is saved.\n\nYou can consult with me as you like.\n\nAvailable commands:\n{COMMANDS_HELP}",
+        f"All set, {name}! Your profile is saved.{garmin_note}\n\nYou can consult with me as you like.\n\nAvailable commands:\n{COMMANDS_HELP}",
     )
     context.user_data.clear()
     return ConversationHandler.END
@@ -134,7 +132,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
 
     storage.clear_history(str(user_id))
-    profile = storage.load_profile(str(user_id), fallback_path=_PROFILE_PATH)
+    profile = storage.load_profile(str(user_id))
     context.user_data["uid"] = str(user_id)
     context.user_data["profile"] = dict(profile)
     context.user_data["skip_filled"] = True  # skip already-set fields during /start
@@ -158,7 +156,7 @@ async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     if not _is_allowed(user_id):
         return ConversationHandler.END
 
-    profile = storage.load_profile(str(user_id), fallback_path=_PROFILE_PATH)
+    profile = storage.load_profile(str(user_id))
     context.user_data["uid"] = str(user_id)
     context.user_data["profile"] = dict(profile)
     context.user_data["skip_filled"] = False  # ask every field so user can update anything
@@ -252,6 +250,20 @@ async def _ask_dietary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return WIZARD_DIETARY
 
 
+async def _ask_garmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Ask whether the user has a Garmin device and return WIZARD_GARMIN state."""
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Yes", callback_data="wiz:garmin:yes"),
+        InlineKeyboardButton("No", callback_data="wiz:garmin:no"),
+    ]])
+    await context.bot.send_message(
+        update.effective_chat.id,
+        "Do you use a Garmin device for activity and sleep tracking?",
+        reply_markup=kb,
+    )
+    return WIZARD_GARMIN
+
+
 _ASK_FNS: dict[int, any] = {
     WIZARD_NAME: _ask_name,
     WIZARD_AGE: _ask_age,
@@ -261,6 +273,7 @@ _ASK_FNS: dict[int, any] = {
     WIZARD_WEEKLY_DAYS: _ask_weekly_days,
     WIZARD_SESSION_DURATION: _ask_session_duration,
     WIZARD_DIETARY: _ask_dietary,
+    WIZARD_GARMIN: _ask_garmin,
 }
 
 # ---------------------------------------------------------------------------
@@ -347,6 +360,24 @@ async def wizard_dietary_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     context.user_data["profile"]["dietary_restrictions"] = "None"
     return await _advance(update, context, after_field="dietary_restrictions")
 
+
+async def wizard_garmin_yes_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle the 'Yes' Garmin button — mark asked and flag intent to connect."""
+    query = update.callback_query
+    await query.answer()
+    context.user_data["profile"]["garmin_asked"] = True
+    context.user_data["wants_garmin"] = True
+    return await _advance(update, context, after_field="garmin_asked")
+
+
+async def wizard_garmin_no_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle the 'No' Garmin button — mark asked and skip Garmin setup."""
+    query = update.callback_query
+    await query.answer()
+    context.user_data["profile"]["garmin_asked"] = True
+    context.user_data["wants_garmin"] = False
+    return await _advance(update, context, after_field="garmin_asked")
+
 # ---------------------------------------------------------------------------
 # Public factory
 # ---------------------------------------------------------------------------
@@ -369,6 +400,10 @@ def build_wizard_handler() -> ConversationHandler:
             WIZARD_DIETARY: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, wizard_dietary_text),
                 CallbackQueryHandler(wizard_dietary_cb, pattern=r"^wiz:dietary:"),
+            ],
+            WIZARD_GARMIN: [
+                CallbackQueryHandler(wizard_garmin_yes_cb, pattern=r"^wiz:garmin:yes$"),
+                CallbackQueryHandler(wizard_garmin_no_cb, pattern=r"^wiz:garmin:no$"),
             ],
         },
         fallbacks=[CommandHandler("cancel", wizard_cancel)],

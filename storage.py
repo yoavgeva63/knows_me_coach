@@ -15,7 +15,6 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from pathlib import Path
 
 import boto3
 from botocore.exceptions import ClientError
@@ -99,12 +98,11 @@ def clear_history(user_id: str) -> None:
 # User profile
 # ---------------------------------------------------------------------------
 
-def load_profile(user_id: str, fallback_path: str | None = None) -> dict:
+def load_profile(user_id: str) -> dict:
     """Load the user profile, returning the cached copy if available.
 
     On first call per process, fetches from DynamoDB and caches the result.
-    On first run ever (no record in DynamoDB), auto-seeds from fallback_path
-    (user_profile.json) when provided, then persists it to DynamoDB.
+    Returns an empty dict if no profile exists yet (user must run /start).
     """
     if user_id in _profile_cache:
         return _profile_cache[user_id]
@@ -119,16 +117,6 @@ def load_profile(user_id: str, fallback_path: str | None = None) -> dict:
             return profile
     except Exception as exc:
         logger.warning("load_profile failed for %s: %s", user_id, exc)
-
-    # First run: seed from the local JSON file if available
-    if fallback_path:
-        path = Path(fallback_path)
-        if path.exists():
-            profile = json.loads(path.read_text(encoding="utf-8"))
-            profile.setdefault("coach_notes", [])
-            save_profile(user_id, profile)
-            logger.info("Seeded DynamoDB profile for user %s from %s", user_id, fallback_path)
-            return profile
 
     return {}
 
@@ -216,14 +204,62 @@ def save_daily_workout(user_id: str, workout: dict, date_str: str) -> None:
     save_profile(user_id, profile)
 
 
+# ---------------------------------------------------------------------------
+# Garmin tokens
+# ---------------------------------------------------------------------------
+
+def save_garmin_tokens(user_id: str, tokens_json: str) -> None:
+    """Persist Garmin OAuth tokens (garth JSON string) inside the user profile."""
+    profile = load_profile(user_id)
+    profile["garmin_tokens"] = tokens_json
+    save_profile(user_id, profile)
+
+
+def load_garmin_tokens(user_id: str) -> str | None:
+    """Return stored Garmin OAuth tokens string, or None if not connected yet."""
+    profile = load_profile(user_id)
+    return profile.get("garmin_tokens")
+
+
+# ---------------------------------------------------------------------------
+# User enumeration
+# ---------------------------------------------------------------------------
+
+def list_all_user_ids() -> list[str]:
+    """Return every user_id present in the profile table.
+
+    Uses a ProjectionExpression scan so only the key attribute is transferred.
+    Suitable for small user bases (personal tool, not paginated).
+    """
+    table = _dynamodb.Table(PROFILE_TABLE)
+    try:
+        resp = table.scan(ProjectionExpression="user_id")
+        return [item["user_id"] for item in resp.get("Items", [])]
+    except Exception as exc:
+        logger.error("list_all_user_ids failed: %s", exc)
+        return []
+
+
 def load_daily_workout(user_id: str, date_str: str) -> dict | None:
     """Return today's cached workout, or None if not generated yet or from a previous day.
+
+    Always reads directly from DynamoDB (bypassing the in-memory profile cache) because
+    the workout may have been written by a separate process (e.g. morning_check.py cron).
 
     Args:
         date_str: Today's date as YYYY-MM-DD.
     """
-    profile = load_profile(user_id)
-    cached = profile.get("daily_workout")
-    if cached and cached.get("date") == date_str:
-        return cached
+    table = _dynamodb.Table(PROFILE_TABLE)
+    try:
+        resp = table.get_item(Key={"user_id": user_id})
+        item = resp.get("Item")
+        if item:
+            profile = json.loads(item["profile_data"])
+            # Also refresh the in-memory cache so subsequent calls are consistent.
+            _profile_cache[user_id] = profile
+            cached = profile.get("daily_workout")
+            if cached and cached.get("date") == date_str:
+                return cached
+    except Exception as exc:
+        logger.warning("load_daily_workout failed for %s: %s", user_id, exc)
     return None
