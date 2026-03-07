@@ -147,7 +147,7 @@ async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         storage.set_morning_alarm(str(user_id), "sleep")
         await update.message.reply_text(
             "Got it! I'll send your morning briefing automatically as soon as "
-            "Garmin detects you've woken up (but no later than 10:00 AM)."
+            "Garmin detects you've woken up (but no later than 09:30 AM)."
         )
     elif re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", arg):
         storage.set_morning_alarm(str(user_id), arg)
@@ -192,13 +192,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     garmin_data = garmin_daily_stats.fetch_daily_stats(str(user_id))
 
     try:
-        reply = get_claude_response(history, user_text, weather, garmin_data, profile)
+        reply, tool_calls = get_claude_response(history, user_text, weather, garmin_data, profile)
     except Exception as exc:
         logger.error("Claude error: %s", exc)
         await update.message.reply_text(
             "Sorry, I had trouble thinking just now. Please try again in a moment."
         )
         return
+
+    for call in tool_calls:
+        name = call["name"]
+        inp = call["input"]
+        try:
+            if name == "set_morning_alarm":
+                storage.set_morning_alarm(str(user_id), inp["time"])
+                logger.info("Tool: set_morning_alarm(%s) for user %s", inp["time"], user_id)
+            elif name == "remember_fact":
+                storage.add_coach_note(str(user_id), inp["fact"])
+                logger.info("Tool: remember_fact for user %s: %s", user_id, inp["fact"])
+            elif name == "trigger_morning_briefing":
+                await send_morning_briefing(context.bot, update.effective_chat.id, str(user_id))
+                logger.info("Tool: trigger_morning_briefing for user %s", user_id)
+        except Exception as exc:
+            logger.error("Tool execution failed (%s) for user %s: %s", name, user_id, exc)
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     history.append({"role": "user", "content": user_text, "ts": today})

@@ -187,6 +187,55 @@ Keep each fact under 15 words. Maximum 3 facts."""
     return facts[:3]
 
 
+ACTION_TOOLS = [
+    {
+        "name": "set_morning_alarm",
+        "description": (
+            "Set the user's morning briefing alarm time. "
+            "Use when the user asks to change, set, or update their morning alarm or briefing time."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "time": {
+                    "type": "string",
+                    "description": (
+                        "HH:MM in Israel time (e.g. '07:00') or 'sleep' to trigger "
+                        "automatically when Garmin detects the user has woken up."
+                    ),
+                }
+            },
+            "required": ["time"],
+        },
+    },
+    {
+        "name": "remember_fact",
+        "description": (
+            "Persist a long-term fact about the user that the coach should always remember. "
+            "Use when the user explicitly asks to remember something, or shares a persistent "
+            "personal detail like an injury, dietary restriction, or training constraint."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "fact": {
+                    "type": "string",
+                    "description": "Concise fact to store, e.g. 'has a sore left knee' or 'doesn't eat meat'.",
+                }
+            },
+            "required": ["fact"],
+        },
+    },
+    {
+        "name": "trigger_morning_briefing",
+        "description": (
+            "Generate and send the full morning workout briefing to the user. "
+            "Use only when the user explicitly asks for their morning briefing or today's workout plan."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+]
+
 _WORKOUT_BRIEFING_TOOL = {
     "name": "workout_briefing",
     "description": "Return the structured morning workout briefing.",
@@ -261,9 +310,13 @@ def get_claude_response(
     weather: str = "",
     garmin_data: dict | None = None,
     user_profile: dict | None = None,
-) -> str:
+) -> tuple[str, list[dict]]:
     """
     Send the conversation history + new user message to Claude and return the reply.
+
+    Claude may also decide to call one or more action tools (set alarm, remember a fact,
+    trigger the morning briefing). Tool calls are returned alongside the text so the caller
+    can execute them as side effects — no second LLM call is required for action-only tools.
 
     Args:
         conversation_history: List of {"role": "user"|"assistant", "content": "..."} dicts
@@ -273,7 +326,8 @@ def get_claude_response(
         user_profile: User profile dict including coach_notes (injected into system prompt)
 
     Returns:
-        Claude's reply as a string
+        Tuple of (reply_text, tool_calls) where tool_calls is a list of
+        {"name": str, "input": dict} dicts, usually empty.
     """
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
@@ -291,7 +345,17 @@ def get_claude_response(
         model="claude-sonnet-4-6",
         max_tokens=1024,
         system=system,
+        tools=ACTION_TOOLS,
+        tool_choice={"type": "auto"},
         messages=messages,
     )
 
-    return response.content[0].text
+    text = ""
+    tool_calls = []
+    for block in response.content:
+        if hasattr(block, "text"):
+            text = block.text
+        elif block.type == "tool_use":
+            tool_calls.append({"name": block.name, "input": block.input})
+
+    return text, tool_calls

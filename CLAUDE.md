@@ -10,9 +10,6 @@ Follow every rule here strictly and consistently.
 A personal fitness coaching Telegram bot powered by Claude AI (Anthropic).
 Integrates with Garmin Connect for health data, persists state in AWS DynamoDB,
 and runs as a systemd service on Oracle Cloud Free Tier (Ubuntu 22.04).
-
-Single-user personal tool — not a multi-tenant SaaS.
-
 ---
 
 ## Architecture & File Map

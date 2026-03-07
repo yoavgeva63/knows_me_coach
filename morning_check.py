@@ -54,7 +54,10 @@ async def _check_and_send(
     if alarm_time == "sleep":
         try:
             garmin_data = garmin_daily_stats.fetch_daily_stats(user_id_str, force_refresh=True)
-            wake_utc_str = (garmin_data or {}).get("sleep", {}).get("wake_time_utc")
+            garmin_dict = garmin_data or {}
+
+            # 1. Official Garmin wake time from sleep summary.
+            wake_utc_str = garmin_dict.get("sleep", {}).get("wake_time_utc")
             if wake_utc_str:
                 wake_utc = datetime.fromisoformat(wake_utc_str)
                 wake_israel = wake_utc + timedelta(hours=_ISRAEL_UTC_OFFSET_H)
@@ -64,6 +67,20 @@ async def _check_and_send(
                         user_id_str, wake_israel.strftime("%H:%M"),
                     )
                     should_send = True
+
+            # 2. Step-based fallback: steps sync faster than sleep summaries.
+            #    Only active 06:00–16:00 to avoid bathroom trips at night.
+            if not should_send and "06:00" <= now_hhmm <= "16:00":
+                steps_info = garmin_dict.get("steps", {})
+                total_steps = steps_info.get("total_steps", 0) if isinstance(steps_info, dict) else 0
+                if total_steps > 100:
+                    logger.info(
+                        "Step-based wake detected for %s (%d steps).",
+                        user_id_str, total_steps,
+                    )
+                    should_send = True
+
+            # 3. Hard fallback: send regardless if 09:30 has passed.
             if not should_send and now_hhmm >= _SLEEP_MODE_FALLBACK:
                 logger.info("Sleep mode fallback reached for %s (%s).", user_id_str, now_hhmm)
                 should_send = True
