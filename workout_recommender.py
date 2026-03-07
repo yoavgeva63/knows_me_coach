@@ -174,13 +174,13 @@ Intensity ceiling: {recovery["intensity_ceiling"]} (max RPE {recovery["max_rpe"]
 Write today's morning briefing for {name}:
 - summary: one sentence — workout type and RPE (e.g. "Push day — RPE 7, heavy compound work (~60 min)")
 - motivation: one sentence drawing on the athlete's goal or recent context — no fluff
-- full_recommendation: start directly with the workout title and structure (no greeting, no recovery recap). Then the full detailed session plan. Close with a single coaching note referencing today's recovery tier (e.g. "Recovery is solid today — feel free to push." or "Recovery is moderate — keep 1-2 reps in the tank on every set."). Be specific:
+- workout_recommendation: start directly with the workout title and structure (no greeting, no recovery recap). Then the full detailed session plan. Close with a single coaching note referencing today's recovery tier (e.g. "Recovery is solid today — feel free to push." or "Recovery is moderate — keep 1-2 reps in the tank on every set."). Be specific:
   - Gym session → exact exercises, sets × reps per exercise
   - Run → distance, structure (warmup / main set / cooldown), pace guidance via speed or RPE
   - Active recovery → exactly what to do and for how long
   Respect the intensity ceiling above. Target ~{session_duration} min total. Concise and actionable — under 230 words.
 
-Do not reference or react to any prior conversation in summary or motivation. Use prior context only in full_recommendation if directly relevant (e.g. user mentioned soreness)."""
+Do not reference or react to any prior conversation in summary or motivation. Use prior context only in workout_recommendation if directly relevant (e.g. user mentioned soreness)."""
 
     # ── 5. Call Claude via brain.py (structured output) ──────────────────────
     result = get_workout_briefing(prompt, conversation_history)

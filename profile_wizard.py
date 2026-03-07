@@ -34,12 +34,13 @@ logger = logging.getLogger(__name__)
 
 
 COMMANDS_HELP = (
-    "/morning — daily briefing\n"
-    "/clear — reset conversation\n"
-    "/remember <fact> — store a note\n"
-    "/settime <HH:MM|sleep> — change morning alarm\n"
-    "/profile — update your profile\n"
-    "/connect_garmin — relink your Garmin account"
+    "Just talk to me naturally — here are some things you can say:\n"
+    "• \"Give me my morning briefing\" — get today's workout plan\n"
+    "• \"Set my alarm to 07:30\" — change your morning briefing time\n"
+    "• \"Remember that I have a sore knee\" — save something important\n"
+    "• \"Clear our conversation\" — start fresh\n"
+    "• \"Update my profile\" — run /profile to change your goals, weight, etc.\n"
+    "• \"Connect my Garmin\" — run /connect_garmin to relink your device"
 )
 
 # ---------------------------------------------------------------------------

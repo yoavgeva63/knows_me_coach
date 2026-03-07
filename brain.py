@@ -27,7 +27,12 @@ Your communication style:
 - Remember context from earlier in the conversation
 
 When you don't have data (e.g. no Garmin sync yet) assume from the past and tell the user.
-Always respond in the same language the user writes in."""
+Always respond in the same language the user writes in.
+
+For destructive or complex actions, never execute directly — instead guide the user to confirm:
+- Clear conversation history → "To erase our conversation history, tap /clear to confirm."
+- Update profile fields (goal, weight, fitness level, etc.) → "To update your profile, tap /profile."
+- Reconnect Garmin → "To relink your Garmin account, tap /connect_garmin."""
 
 
 def _fmt_seconds(s) -> str:
@@ -234,6 +239,28 @@ ACTION_TOOLS = [
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
+    {
+        "name": "update_daily_workout",
+        "description": (
+            "Save the workout plan you just generated into today's cached workout. "
+            "Call this whenever you generate or modify today's workout so the Workout button stays in sync. "
+            "If no workout exists for today it will be created automatically."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "workout_recommendation": {
+                    "type": "string",
+                    "description": "The complete workout plan text to cache.",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Optional one-line summary, e.g. 'Easy 30-min swim, RPE 5'.",
+                },
+            },
+            "required": ["workout_recommendation"],
+        },
+    },
 ]
 
 _WORKOUT_BRIEFING_TOOL = {
@@ -250,12 +277,12 @@ _WORKOUT_BRIEFING_TOOL = {
                 "type": "string",
                 "description": "One motivational sentence tied to the athlete's goal or recent context",
             },
-            "full_recommendation": {
+            "workout_recommendation": {
                 "type": "string",
                 "description": "Full workout detail — starts directly with the workout title, no greeting. Ends with a one-line recovery coaching note.",
             },
         },
-        "required": ["summary", "motivation", "full_recommendation"],
+        "required": ["summary", "motivation", "workout_recommendation"],
     },
 }
 
@@ -290,7 +317,7 @@ def get_workout_briefing(
         conversation_history: Prior conversation messages for context.
 
     Returns:
-        Dict with keys: summary, motivation, full_recommendation.
+        Dict with keys: summary, motivation, workout_recommendation.
     """
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     response = client.messages.create(

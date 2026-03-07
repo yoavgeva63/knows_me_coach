@@ -192,11 +192,32 @@ def mark_morning_sent(user_id: str, date_str: str) -> None:
 # Daily workout cache
 # ---------------------------------------------------------------------------
 
+def patch_daily_workout(user_id: str, fields: dict, date_str: str) -> None:
+    """Update specific fields of today's cached workout.
+
+    Caller is responsible for ensuring a base workout exists for date_str before calling
+    (e.g. by calling save_daily_workout first if load_daily_workout returns None).
+
+    Args:
+        fields: Fields to update — supports 'workout_recommendation' and 'summary'.
+        date_str: Today's date as YYYY-MM-DD.
+    """
+    profile = load_profile(user_id)
+    existing = profile.get("daily_workout", {})
+    if existing.get("date") != date_str:
+        logger.warning("patch_daily_workout: no workout cached for %s on %s — skipping", user_id, date_str)
+        return
+    workout = dict(existing)
+    workout.update({k: v for k, v in fields.items() if v is not None})
+    profile["daily_workout"] = workout
+    save_profile(user_id, profile)
+
+
 def save_daily_workout(user_id: str, workout: dict, date_str: str) -> None:
     """Cache today's pre-generated workout in the user profile.
 
     Args:
-        workout:  Dict with keys: summary, motivation, full_recommendation, recovery_tier.
+        workout:  Dict with keys: summary, motivation, workout_recommendation, recovery_tier.
         date_str: Today's date as YYYY-MM-DD — used to detect staleness tomorrow.
     """
     profile = load_profile(user_id)

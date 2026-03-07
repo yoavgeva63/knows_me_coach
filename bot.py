@@ -28,6 +28,7 @@ from auth import is_allowed
 from brain import get_claude_response, extract_memorable_facts
 from briefing import fetch_weather, md_to_html, send_morning_briefing
 from profile_wizard import build_wizard_handler
+from workout_recommender import get_workout_recommendation
 
 load_dotenv()
 
@@ -213,6 +214,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             elif name == "trigger_morning_briefing":
                 await send_morning_briefing(context.bot, update.effective_chat.id, str(user_id))
                 logger.info("Tool: trigger_morning_briefing for user %s", user_id)
+            elif name == "update_daily_workout":
+                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                if not storage.load_daily_workout(str(user_id), today_str):
+                    base = get_workout_recommendation(garmin_data, profile, weather, history)
+                    storage.save_daily_workout(str(user_id), base, today_str)
+                fields = {"workout_recommendation": inp["workout_recommendation"]}
+                if inp.get("summary"):
+                    fields["summary"] = inp["summary"]
+                storage.patch_daily_workout(str(user_id), fields, today_str)
+                logger.info("Tool: update_daily_workout for user %s", user_id)
         except Exception as exc:
             logger.error("Tool execution failed (%s) for user %s: %s", name, user_id, exc)
 
@@ -265,7 +276,7 @@ async def handle_briefing_action(update: Update, _context: ContextTypes.DEFAULT_
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         cached = storage.load_daily_workout(str(user_id), today)
         if cached:
-            full_text = cached["full_recommendation"]
+            full_text = cached["workout_recommendation"]
         else:
             await query.message.reply_text("No workout cached for today — send /morning to generate one.")
             return
