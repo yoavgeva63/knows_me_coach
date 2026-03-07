@@ -289,7 +289,7 @@ def main() -> None:
     """Build and start the bot."""
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     app = Application.builder().token(token).build()
-
+    
     storage.ensure_tables()
 
     app.add_handler(build_wizard_handler())

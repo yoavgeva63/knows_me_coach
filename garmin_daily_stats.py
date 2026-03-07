@@ -41,6 +41,7 @@ def get_garmin_client(user_id: str) -> Garmin:
         )
     client = Garmin()
     client.garth.loads(tokens_json)
+    client.display_name = client.garth.profile.get("displayName")
     return client
 
 

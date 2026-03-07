@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _ISRAEL_UTC_OFFSET_H = 2
-_SLEEP_MODE_FALLBACK = "9:30"
+_SLEEP_MODE_FALLBACK = "09:30"
 
 
 async def _check_and_send(
@@ -79,7 +79,7 @@ async def _check_and_send(
                         user_id_str, total_steps,
                     )
                     should_send = True
-
+            
             # 3. Hard fallback: send regardless if 09:30 has passed.
             if not should_send and now_hhmm >= _SLEEP_MODE_FALLBACK:
                 logger.info("Sleep mode fallback reached for %s (%s).", user_id_str, now_hhmm)

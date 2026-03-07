@@ -1,8 +1,11 @@
 """
 Profile setup wizard for the fitness coach bot.
 
-Implements a sequential ConversationHandler that collects (or updates) the 9
-required profile fields.  Two entry points:
+Implements a sequential ConversationHandler that collects (or updates) the
+required profile fields, then guides the user through Garmin Connect setup
+and morning alarm configuration.
+
+Two entry points:
   - /start  : skips fields that are already filled in DynamoDB
   - /profile: asks every field so the user can update anything
 
@@ -10,7 +13,9 @@ Call build_wizard_handler() to get the configured ConversationHandler to registe
 with the PTB Application.
 """
 import logging
+import re
 
+from garminconnect import GarminConnectAuthenticationError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     CallbackQueryHandler,
@@ -21,6 +26,7 @@ from telegram.ext import (
     filters,
 )
 
+import garmin_daily_stats
 import storage
 from auth import is_allowed as _is_allowed
 
@@ -31,9 +37,9 @@ COMMANDS_HELP = (
     "/morning — daily briefing\n"
     "/clear — reset conversation\n"
     "/remember <fact> — store a note\n"
-    "/settime <HH:MM|sleep> — morning alarm\n"
+    "/settime <HH:MM|sleep> — change morning alarm\n"
     "/profile — update your profile\n"
-    "/connect_garmin — link or relink your Garmin account"
+    "/connect_garmin — relink your Garmin account"
 )
 
 # ---------------------------------------------------------------------------
@@ -50,7 +56,10 @@ COMMANDS_HELP = (
     WIZARD_SESSION_DURATION,
     WIZARD_DIETARY,
     WIZARD_GARMIN,
-) = range(9)
+    WIZARD_GARMIN_EMAIL,
+    WIZARD_GARMIN_PASSWORD,
+    WIZARD_ALARM_TIME,
+) = range(12)
 
 # Ordered list of (profile_key, wizard_state) — defines both field order and
 # the mapping used by _advance() to skip already-filled fields.
@@ -64,6 +73,7 @@ _FIELD_STATES: list[tuple[str, int]] = [
     ("preferred_session_duration_minutes", WIZARD_SESSION_DURATION),
     ("dietary_restrictions", WIZARD_DIETARY),
     ("garmin_asked", WIZARD_GARMIN),
+    ("morning_alarm_time", WIZARD_ALARM_TIME),
 ]
 
 # ---------------------------------------------------------------------------
@@ -112,7 +122,7 @@ async def _finish_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     garmin_note = ""
     if context.user_data.get("wants_garmin") and not storage.load_garmin_tokens(uid):
-        garmin_note = "\n\nRun /connect_garmin to link your Garmin device and unlock live recovery data in your morning briefing."
+        garmin_note = "\n\n⚠️ Garmin linking failed — run /connect_garmin to try again."
 
     await context.bot.send_message(
         update.effective_chat.id,
@@ -264,6 +274,38 @@ async def _ask_garmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return WIZARD_GARMIN
 
 
+async def _ask_garmin_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Prompt for Garmin Connect email and return WIZARD_GARMIN_EMAIL state."""
+    await context.bot.send_message(
+        update.effective_chat.id,
+        "What's your Garmin Connect email address?",
+    )
+    return WIZARD_GARMIN_EMAIL
+
+
+async def _ask_alarm_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Ask when to send the morning briefing and return WIZARD_ALARM_TIME state."""
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("07:00", callback_data="wiz:alarm:07:00"),
+            InlineKeyboardButton("08:00", callback_data="wiz:alarm:08:00"),
+            InlineKeyboardButton("09:00", callback_data="wiz:alarm:09:00"),
+        ],
+        [
+            InlineKeyboardButton("🌙 Sleep mode (auto-detect)", callback_data="wiz:alarm:sleep"),
+        ],
+    ])
+    await context.bot.send_message(
+        update.effective_chat.id,
+        "When should I send your morning briefing?\n"
+        "Pick a time or choose Sleep mode — I'll trigger it automatically "
+        "when Garmin detects you've woken up.\n"
+        "You can also type a custom time (e.g. 08:45).",
+        reply_markup=kb,
+    )
+    return WIZARD_ALARM_TIME
+
+
 _ASK_FNS: dict[int, any] = {
     WIZARD_NAME: _ask_name,
     WIZARD_AGE: _ask_age,
@@ -274,6 +316,7 @@ _ASK_FNS: dict[int, any] = {
     WIZARD_SESSION_DURATION: _ask_session_duration,
     WIZARD_DIETARY: _ask_dietary,
     WIZARD_GARMIN: _ask_garmin,
+    WIZARD_ALARM_TIME: _ask_alarm_time,
 }
 
 # ---------------------------------------------------------------------------
@@ -362,21 +405,78 @@ async def wizard_dietary_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def wizard_garmin_yes_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle the 'Yes' Garmin button — mark asked and flag intent to connect."""
+    """Handle the 'Yes' Garmin button — mark asked and start the Garmin connect flow."""
     query = update.callback_query
     await query.answer()
     context.user_data["profile"]["garmin_asked"] = True
     context.user_data["wants_garmin"] = True
-    return await _advance(update, context, after_field="garmin_asked")
+    return await _ask_garmin_email(update, context)
 
 
 async def wizard_garmin_no_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle the 'No' Garmin button — mark asked and skip Garmin setup."""
+    """Handle the 'No' Garmin button — mark asked and go straight to alarm time."""
     query = update.callback_query
     await query.answer()
     context.user_data["profile"]["garmin_asked"] = True
     context.user_data["wants_garmin"] = False
     return await _advance(update, context, after_field="garmin_asked")
+
+
+async def wizard_garmin_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Collect Garmin email and ask for password."""
+    context.user_data["garmin_email"] = update.message.text.strip()
+    await context.bot.send_message(
+        update.effective_chat.id,
+        "Now enter your Garmin Connect password.\n"
+        "⚠️ Your message will be visible in chat — delete it after sending.",
+    )
+    return WIZARD_GARMIN_PASSWORD
+
+
+async def wizard_garmin_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Collect password, authenticate with Garmin, then proceed to alarm time."""
+    uid = context.user_data["uid"]
+    email = context.user_data.pop("garmin_email", "")
+    password = update.message.text.strip()
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    try:
+        garmin_daily_stats.initial_login(uid, email, password)
+        await update.message.reply_text("✅ Garmin Connect linked!")
+    except GarminConnectAuthenticationError:
+        await update.message.reply_text(
+            "❌ Authentication failed — you can try again later with /connect_garmin."
+        )
+    except Exception as exc:
+        logger.error("Garmin connect error for %s: %s", uid, exc)
+        await update.message.reply_text(
+            "Something went wrong connecting to Garmin. You can try again later with /connect_garmin."
+        )
+
+    return await _ask_alarm_time(update, context)
+
+
+async def wizard_alarm_time_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle alarm time button selection."""
+    query = update.callback_query
+    await query.answer()
+    alarm = query.data.split(":", 2)[2]  # "wiz:alarm:07:30" → "07:30", "wiz:alarm:sleep" → "sleep"
+    context.user_data["profile"]["morning_alarm_time"] = alarm
+    return await _advance(update, context, after_field="morning_alarm_time")
+
+
+async def wizard_alarm_time_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle free-text alarm time entry (HH:MM or 'sleep')."""
+    text = update.message.text.strip().lower()
+    if text == "sleep":
+        alarm = "sleep"
+    elif re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", text):
+        alarm = text
+    else:
+        await update.message.reply_text("Please enter a valid time like 06:45, or 'sleep'.")
+        return WIZARD_ALARM_TIME
+    context.user_data["profile"]["morning_alarm_time"] = alarm
+    return await _advance(update, context, after_field="morning_alarm_time")
 
 # ---------------------------------------------------------------------------
 # Public factory
@@ -404,6 +504,12 @@ def build_wizard_handler() -> ConversationHandler:
             WIZARD_GARMIN: [
                 CallbackQueryHandler(wizard_garmin_yes_cb, pattern=r"^wiz:garmin:yes$"),
                 CallbackQueryHandler(wizard_garmin_no_cb, pattern=r"^wiz:garmin:no$"),
+            ],
+            WIZARD_GARMIN_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, wizard_garmin_email)],
+            WIZARD_GARMIN_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, wizard_garmin_password)],
+            WIZARD_ALARM_TIME: [
+                CallbackQueryHandler(wizard_alarm_time_cb, pattern=r"^wiz:alarm:"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, wizard_alarm_time_text),
             ],
         },
         fallbacks=[CommandHandler("cancel", wizard_cancel)],
