@@ -135,8 +135,14 @@ def save_profile(user_id: str, profile: dict) -> None:
         logger.error("save_profile failed for %s: %s", user_id, exc)
 
 
+MAX_COACH_NOTES = 20
+
+
 def add_coach_note(user_id: str, note: str) -> None:
-    """Append a timestamped note to the user's coach_notes list."""
+    """Append a timestamped note to the user's coach_notes list, capped at MAX_COACH_NOTES.
+
+    When the cap is reached, the oldest notes are dropped first.
+    """
     profile = load_profile(user_id)
     if not profile:
         logger.warning("add_coach_note: no profile found for user %s", user_id)
@@ -146,6 +152,10 @@ def add_coach_note(user_id: str, note: str) -> None:
         "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "note": note,
     })
+    if len(notes) > MAX_COACH_NOTES:
+        dropped = len(notes) - MAX_COACH_NOTES
+        profile["coach_notes"] = notes[dropped:]
+        logger.info("Pruned %d oldest coach note(s) for user %s", dropped, user_id)
     save_profile(user_id, profile)
 
 

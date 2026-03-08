@@ -191,9 +191,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     history = storage.load_history(str(user_id))
     weather = fetch_weather()
     garmin_data = garmin_daily_stats.fetch_daily_stats(str(user_id))
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    daily_workout = storage.load_daily_workout(str(user_id), today_str)
 
     try:
-        reply, tool_calls = get_claude_response(history, user_text, weather, garmin_data, profile)
+        reply, tool_calls = get_claude_response(history, user_text, weather, garmin_data, profile, daily_workout)
     except Exception as exc:
         logger.error("Claude error: %s", exc)
         await update.message.reply_text(
@@ -201,6 +203,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    briefing_triggered = False
     for call in tool_calls:
         name = call["name"]
         inp = call["input"]
@@ -212,10 +215,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 storage.add_coach_note(str(user_id), inp["fact"])
                 logger.info("Tool: remember_fact for user %s: %s", user_id, inp["fact"])
             elif name == "trigger_morning_briefing":
-                await send_morning_briefing(context.bot, update.effective_chat.id, str(user_id))
-                logger.info("Tool: trigger_morning_briefing for user %s", user_id)
+                # Guard: skip if briefing already sent today (daily_workout date matches today).
+                if daily_workout and daily_workout.get("date") == today_str:
+                    logger.info("Tool: trigger_morning_briefing skipped — already sent today for %s", user_id)
+                else:
+                    await send_morning_briefing(context.bot, update.effective_chat.id, str(user_id))
+                    briefing_triggered = True
+                    logger.info("Tool: trigger_morning_briefing for user %s", user_id)
             elif name == "update_daily_workout":
-                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 if not storage.load_daily_workout(str(user_id), today_str):
                     base = get_workout_recommendation(garmin_data, profile, weather, history)
                     storage.save_daily_workout(str(user_id), base, today_str)
@@ -227,15 +234,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception as exc:
             logger.error("Tool execution failed (%s) for user %s: %s", name, user_id, exc)
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    history.append({"role": "user", "content": user_text, "ts": today})
-    history.append({"role": "assistant", "content": reply, "ts": today})
+    # If send_morning_briefing ran, it saved its own history entries — reload to avoid overwriting them.
+    if briefing_triggered:
+        history = storage.load_history(str(user_id))
+
+    history.append({"role": "user", "content": user_text, "ts": today_str})
+    history.append({"role": "assistant", "content": reply, "ts": today_str})
 
     # Drop messages older than 7 days (with fact extraction on what's dropped).
     cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
-    stale = [m for m in history if m.get("ts", today) < cutoff]
+    stale = [m for m in history if m.get("ts", today_str) < cutoff]
     if stale:
-        history = [m for m in history if m.get("ts", today) >= cutoff]
+        history = [m for m in history if m.get("ts", today_str) >= cutoff]
         try:
             extracted = extract_memorable_facts(stale, profile.get("coach_notes", []))
             for fact in extracted:

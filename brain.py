@@ -3,6 +3,8 @@ Claude AI brain for the fitness coach bot.
 Manages conversation history and sends messages to Claude.
 """
 import os
+from datetime import datetime, timezone
+
 import anthropic
 
 # System prompt that defines the coach's personality and capabilities
@@ -337,6 +339,7 @@ def get_claude_response(
     weather: str = "",
     garmin_data: dict | None = None,
     user_profile: dict | None = None,
+    daily_workout: dict | None = None,
 ) -> tuple[str, list[dict]]:
     """
     Send the conversation history + new user message to Claude and return the reply.
@@ -351,6 +354,7 @@ def get_claude_response(
         weather: Current weather string (injected into system prompt when available)
         garmin_data: Latest Garmin daily stats (injected into system prompt when available)
         user_profile: User profile dict including coach_notes (injected into system prompt)
+        daily_workout: Today's cached workout plan (injected into system prompt when available)
 
     Returns:
         Tuple of (reply_text, tool_calls) where tool_calls is a list of
@@ -364,7 +368,10 @@ def get_claude_response(
     if weather and weather != "Weather unavailable":
         system += f"\n\nCurrent weather: {weather}"
     if garmin_data:
-        system += f"\n\nLatest Garmin data:\n{_format_garmin_context(garmin_data)}"
+        fetch_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        system += f"\n\nLatest Garmin data (fetched at {fetch_time}):\n{_format_garmin_context(garmin_data)}"
+    if daily_workout and daily_workout.get("workout_recommendation"):
+        system += f"\n\nToday's cached workout plan:\n{daily_workout['workout_recommendation']}"
 
     messages = _clean_history(conversation_history + [{"role": "user", "content": user_message}])
 

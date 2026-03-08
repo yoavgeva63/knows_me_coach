@@ -16,13 +16,14 @@ import os
 from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
+
+load_dotenv()  # must run before local imports so AWS env vars are set before boto3 initialises
+
 from telegram import Bot
 
 import garmin_daily_stats
 import storage
 from briefing import send_morning_briefing
-
-load_dotenv()
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",

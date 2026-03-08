@@ -16,8 +16,8 @@ and runs as a systemd service on Oracle Cloud Free Tier (Ubuntu 22.04).
 
 | File | Responsibility |
 |---|---|
-| `bot.py` | Telegram entry point — command handlers, briefing button callbacks |
-| `brain.py` | **All** Claude API calls — conversation, workout briefing, fact extraction |
+| `bot.py` | Telegram entry point — command handlers, briefing button callbacks, tool execution |
+| `brain.py` | **All** Claude API calls — conversation (with action tools), workout briefing, fact extraction |
 | `storage.py` | **Only** module that touches DynamoDB / boto3 |
 | `briefing.py` | Morning briefing — build message, inline keyboard, cache workout, send |
 | `profile_wizard.py` | `/start` + `/profile` ConversationHandler wizard (8-field setup) |
@@ -72,6 +72,25 @@ Local dev: `venv\Scripts\activate` then `python bot.py`
 
 ---
 
+## Natural Language Action Tools
+
+`brain.py` exposes `ACTION_TOOLS` — Claude may call these as side effects within a single LLM response (no second call needed for state-change actions):
+
+| Tool | Effect |
+|---|---|
+| `set_morning_alarm(time)` | Calls `storage.set_morning_alarm()` |
+| `remember_fact(fact)` | Calls `storage.add_coach_note()` |
+| `trigger_morning_briefing()` | Calls `briefing.send_morning_briefing()` |
+| `update_daily_workout(workout_recommendation, summary?)` | Calls `storage.patch_daily_workout()`, generating a base via `get_workout_recommendation` first if none exists today |
+
+**Adding a new tool:** define it in `ACTION_TOOLS` in `brain.py`, add the execution branch in `bot.py`'s `handle_message` tool loop.
+
+**Destructive / complex actions** (clear history, profile update, Garmin reconnect) are **not tools** — Claude is instructed in `SYSTEM_PROMPT` to direct the user to the relevant slash command instead (`/clear`, `/profile`, `/connect_garmin`).
+
+**Cached workout key:** `workout_recommendation` (renamed from `full_recommendation` — all pipeline stages use this name consistently).
+
+---
+
 ## When Adding or Changing Features
 
 1. Read the relevant module(s) and `docs/` file before writing any code.
@@ -79,6 +98,7 @@ Local dev: `venv\Scripts\activate` then `python bot.py`
 3. New external service → new dedicated module (like `garmin_daily_stats.py`).
 4. New persistence → add to `storage.py` only.
 5. New Claude call → add to `brain.py` only.
-6. Update `requirements.txt` if new packages are needed.
-7. **Update `CLAUDE.md` file map and the relevant `docs/` file when done.**
+6. New natural language action → add tool to `ACTION_TOOLS` in `brain.py` + handler in `bot.py`.
+7. Update `requirements.txt` if new packages are needed.
+8. **Update `CLAUDE.md` file map and the relevant `docs/` file when done.**
    If no `docs/` file exists for the feature yet, create one under `docs/<feature>.md`.
