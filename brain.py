@@ -99,6 +99,7 @@ def _format_profile_context(user_profile: dict) -> str:
         f"Name: {user_profile.get('name', 'N/A')} | "
         f"Age: {user_profile.get('age', 'N/A')} | "
         f"Weight: {user_profile.get('weight_kg', 'N/A')} kg | "
+        f"Height: {user_profile.get('height_cm', 'N/A')} cm | "
         f"Level: {user_profile.get('fitness_level', 'N/A')}",
         f"Primary goal: {user_profile.get('primary_goal', user_profile.get('fitness_goal', 'N/A'))}",
         f"Secondary goal: {user_profile.get('secondary_goal', 'N/A')}",
