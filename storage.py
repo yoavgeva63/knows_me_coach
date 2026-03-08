@@ -14,7 +14,7 @@ Caching:
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import boto3
 from botocore.exceptions import ClientError
@@ -253,6 +253,141 @@ def load_garmin_tokens(user_id: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Nutrition tracking
+# ---------------------------------------------------------------------------
+
+_NUTRITION_HISTORY_DAYS = 7
+
+
+def _get_nutrition(profile: dict) -> dict:
+    """Return the nutrition sub-dict from a profile, creating it if absent."""
+    return profile.setdefault("nutrition", {})
+
+
+def load_daily_meals(user_id: str, date_str: str) -> list[dict]:
+    """Return the list of logged meals for date_str, or [] if none.
+
+    Each meal dict contains: name, slot, kcal, protein_g, fat_g, carbs_g, logged_at.
+    """
+    profile = load_profile(user_id)
+    return _get_nutrition(profile).get("daily_meals", {}).get(date_str, [])
+
+
+def save_daily_meal(user_id: str, date_str: str, meal: dict) -> None:
+    """Append a logged meal to today's list and prune entries older than 7 days.
+
+    Args:
+        date_str: Date key as YYYY-MM-DD.
+        meal:     Dict with keys: name, slot, kcal, protein_g, fat_g, carbs_g, logged_at.
+    """
+    profile = load_profile(user_id)
+    nutrition = _get_nutrition(profile)
+    daily = nutrition.setdefault("daily_meals", {})
+    daily.setdefault(date_str, []).append(meal)
+
+    # Prune dates older than _NUTRITION_HISTORY_DAYS to prevent profile bloat.
+    cutoff = (
+        datetime.now(timezone.utc).date()
+        - timedelta(days=_NUTRITION_HISTORY_DAYS)
+    ).isoformat()
+    nutrition["daily_meals"] = {d: v for d, v in daily.items() if d >= cutoff}
+
+    save_profile(user_id, profile)
+
+
+def replace_daily_meal(user_id: str, date_str: str, slot: str, meal: dict) -> None:
+    """Replace the logged meal for a given slot, or append if none exists yet.
+
+    Args:
+        slot: "breakfast", "lunch", or "dinner".
+        meal: Full meal dict to store.
+    """
+    profile = load_profile(user_id)
+    nutrition = _get_nutrition(profile)
+    meals = nutrition.setdefault("daily_meals", {}).setdefault(date_str, [])
+    nutrition["daily_meals"][date_str] = [m for m in meals if m.get("slot") != slot]
+    nutrition["daily_meals"][date_str].append(meal)
+    save_profile(user_id, profile)
+
+
+def log_meal(user_id: str, date_str: str, meal: dict) -> None:
+    """Log a meal and clear pending options in a single DynamoDB write.
+
+    Replaces the existing meal for the same slot if one was already logged today,
+    appends otherwise. Also prunes history and clears pending_options atomically,
+    avoiding the two-write pattern of save_daily_meal + clear_pending_meal_options.
+
+    Args:
+        date_str: Date key as YYYY-MM-DD.
+        meal:     Dict with keys: name, slot, kcal, protein_g, fat_g, carbs_g, logged_at.
+    """
+    profile = load_profile(user_id)
+    nutrition = _get_nutrition(profile)
+    slot = meal["slot"]
+    daily = nutrition.setdefault("daily_meals", {})
+    existing = daily.setdefault(date_str, [])
+    daily[date_str] = [m for m in existing if m.get("slot") != slot] + [meal]
+
+    cutoff = (
+        datetime.now(timezone.utc).date()
+        - timedelta(days=_NUTRITION_HISTORY_DAYS)
+    ).isoformat()
+    nutrition["daily_meals"] = {d: v for d, v in daily.items() if d >= cutoff}
+    nutrition.pop("pending_options", None)
+
+    save_profile(user_id, profile)
+
+
+def save_groceries(user_id: str, ingredient_str: str) -> None:
+    """Persist the user's current ingredient list with a timestamp."""
+    profile = load_profile(user_id)
+    nutrition = _get_nutrition(profile)
+    nutrition["last_groceries"] = ingredient_str
+    nutrition["last_groceries_updated_at"] = datetime.now(timezone.utc).isoformat()
+    save_profile(user_id, profile)
+
+
+def load_groceries(user_id: str) -> tuple[str | None, str | None]:
+    """Return (ingredient_str, updated_at_iso) or (None, None) if never set."""
+    profile = load_profile(user_id)
+    nutrition = _get_nutrition(profile)
+    return nutrition.get("last_groceries"), nutrition.get("last_groceries_updated_at")
+
+
+def save_pending_meal_options(user_id: str, slot: str, options: list[dict]) -> None:
+    """Cache the two meal options Claude just generated, keyed to today + slot.
+
+    Stored so the [✅ Option 1] / [✅ Option 2] buttons can retrieve full meal
+    data without encoding it in callback_data (Telegram limit: 64 bytes).
+
+    Args:
+        slot:    "breakfast", "lunch", or "dinner".
+        options: List of meal dicts (name, kcal, protein_g, fat_g, carbs_g, time_min, reasoning).
+    """
+    profile = load_profile(user_id)
+    nutrition = _get_nutrition(profile)
+    nutrition["pending_options"] = {
+        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "slot": slot,
+        "options": options,
+    }
+    save_profile(user_id, profile)
+
+
+def load_pending_meal_options(user_id: str) -> dict | None:
+    """Return the cached pending meal options dict, or None if not set."""
+    profile = load_profile(user_id)
+    return _get_nutrition(profile).get("pending_options")
+
+
+def clear_pending_meal_options(user_id: str) -> None:
+    """Remove pending meal options after the user has logged or dismissed them."""
+    profile = load_profile(user_id)
+    _get_nutrition(profile).pop("pending_options", None)
+    save_profile(user_id, profile)
+
+
+# ---------------------------------------------------------------------------
 # User enumeration
 # ---------------------------------------------------------------------------
 
@@ -269,6 +404,35 @@ def list_all_user_ids() -> list[str]:
     except Exception as exc:
         logger.error("list_all_user_ids failed: %s", exc)
         return []
+
+
+def load_user_data(user_id: str, date_str: str) -> tuple[dict, dict | None]:
+    """Single DynamoDB GET returning both the user profile and today's cached workout.
+
+    Replaces the pattern of calling load_profile() + load_daily_workout() separately,
+    which would hit the same table item twice. Always bypasses the in-memory cache
+    (same rationale as load_daily_workout — a cron process may have written the workout).
+
+    Args:
+        date_str: Today's date as YYYY-MM-DD, used to validate workout freshness.
+
+    Returns:
+        (profile, daily_workout) where daily_workout is None if not generated yet
+        or was generated on a different date.
+    """
+    table = _dynamodb.Table(PROFILE_TABLE)
+    try:
+        resp = table.get_item(Key={"user_id": user_id})
+        item = resp.get("Item")
+        if item:
+            profile = json.loads(item["profile_data"])
+            _profile_cache[user_id] = profile
+            cached = profile.get("daily_workout")
+            workout = cached if (cached and cached.get("date") == date_str) else None
+            return profile, workout
+    except Exception as exc:
+        logger.warning("load_user_data failed for %s: %s", user_id, exc)
+    return {}, None
 
 
 def load_daily_workout(user_id: str, date_str: str) -> dict | None:

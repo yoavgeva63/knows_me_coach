@@ -14,7 +14,7 @@ from datetime import date
 
 from brain import get_workout_briefing
 from recovery import classify_recovery
-from garmin_activity_analyzer import analyze_week
+from garmin import analyze_week
 
 
 _TIER_CONTEXT = {

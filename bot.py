@@ -22,11 +22,16 @@ from telegram.ext import (
     filters,
 )
 
-import garmin_daily_stats
+import garmin
 import storage
 from auth import is_allowed
 from brain import get_claude_response, extract_memorable_facts
 from briefing import fetch_weather, md_to_html, send_morning_briefing
+from nutrition_handlers import (
+    build_nutrition_ingredient_handler,
+    handle_nutrition_callback,
+    handle_nutrition_briefing_tap,
+)
 from profile_wizard import build_wizard_handler
 from workout_recommender import get_workout_recommendation
 
@@ -72,7 +77,7 @@ async def _connect_garmin_password(update: Update, context: ContextTypes.DEFAULT
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
-        garmin_daily_stats.initial_login(str(user_id), email, password)
+        garmin.initial_login(str(user_id), email, password)
     except GarminConnectAuthenticationError:
         await update.message.reply_text(
             "Authentication failed — double-check your email and password and try /connect_garmin again."
@@ -181,7 +186,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_text = update.message.text
     logger.info("Message from %s: %s", user_id, user_text[:80])
 
-    profile = storage.load_profile(str(user_id))
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    profile, daily_workout = storage.load_user_data(str(user_id), today_str)
     if not profile:
         await update.message.reply_text("Welcome! Please run /start to set up your profile first.")
         return
@@ -190,9 +196,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     history = storage.load_history(str(user_id))
     weather = fetch_weather()
-    garmin_data = garmin_daily_stats.fetch_daily_stats(str(user_id))
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    daily_workout = storage.load_daily_workout(str(user_id), today_str)
+    garmin_data = garmin.fetch_daily_stats(str(user_id))
 
     try:
         reply, tool_calls = get_claude_response(history, user_text, weather, garmin_data, profile, daily_workout)
@@ -293,7 +297,7 @@ async def handle_briefing_action(update: Update, _context: ContextTypes.DEFAULT_
         await query.message.reply_text(md_to_html(full_text), parse_mode="HTML")
 
     elif action == "nutrition":
-        await query.message.reply_text("🥗 Nutrition planning coming soon!")
+        await handle_nutrition_briefing_tap(query, str(query.from_user.id))
 
     elif action == "sleep":
         await query.message.reply_text("😴 Sleep insights coming soon!")
@@ -315,11 +319,13 @@ def main() -> None:
 
     app.add_handler(build_wizard_handler())
     app.add_handler(_build_garmin_connect_handler())
+    app.add_handler(build_nutrition_ingredient_handler())
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("remember", remember))
     app.add_handler(CommandHandler("morning", morning))
     app.add_handler(CommandHandler("settime", settime))
     app.add_handler(CallbackQueryHandler(handle_briefing_action, pattern=r"^action:"))
+    app.add_handler(CallbackQueryHandler(handle_nutrition_callback, pattern=r"^nutr:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Bot starting in polling mode…")

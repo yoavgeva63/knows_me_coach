@@ -16,11 +16,11 @@ workout plan and caches it so button taps respond instantly.
     ├── fetch_weather()                          [briefing.py]
     ├── storage.load_profile()
     ├── storage.load_history()
-    ├── garmin_daily_stats.fetch_daily_stats()   [Garmin API]
+    ├── garmin.fetch_daily_stats()               [Garmin API]
     │
     ├── workout_recommender.get_workout_recommendation()
     │       ├── recovery.classify_recovery()     [pure rules → tier]
-    │       ├── garmin_activity_analyzer.analyze_week()
+    │       ├── garmin.analyze_week()
     │       ├── builds prompt string
     │       └── brain.get_workout_briefing()     [Claude API — structured output]
     │               returns: {summary, motivation, full_recommendation}

@@ -26,7 +26,7 @@ from telegram.ext import (
     filters,
 )
 
-import garmin_daily_stats
+import garmin
 import storage
 from auth import is_allowed as _is_allowed
 
@@ -52,6 +52,7 @@ COMMANDS_HELP = (
     WIZARD_AGE,
     WIZARD_WEIGHT,
     WIZARD_HEIGHT,
+    WIZARD_SEX,
     WIZARD_GOAL,
     WIZARD_FITNESS_LEVEL,
     WIZARD_WEEKLY_DAYS,
@@ -61,7 +62,7 @@ COMMANDS_HELP = (
     WIZARD_GARMIN_EMAIL,
     WIZARD_GARMIN_PASSWORD,
     WIZARD_ALARM_TIME,
-) = range(13)
+) = range(14)
 
 # Ordered list of (profile_key, wizard_state) — defines both field order and
 # the mapping used by _advance() to skip already-filled fields.
@@ -70,6 +71,7 @@ _FIELD_STATES: list[tuple[str, int]] = [
     ("age", WIZARD_AGE),
     ("weight_kg", WIZARD_WEIGHT),
     ("height_cm", WIZARD_HEIGHT),
+    ("sex", WIZARD_SEX),
     ("primary_goal", WIZARD_GOAL),
     ("fitness_level", WIZARD_FITNESS_LEVEL),
     ("weekly_training_days", WIZARD_WEEKLY_DAYS),
@@ -214,6 +216,18 @@ async def _ask_height(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return WIZARD_HEIGHT
 
 
+async def _ask_sex(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Prompt for biological sex via inline keyboard and return WIZARD_SEX state."""
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Male", callback_data="wiz:sex:male"),
+        InlineKeyboardButton("Female", callback_data="wiz:sex:female"),
+    ]])
+    await context.bot.send_message(
+        update.effective_chat.id, "What's your biological sex? (used for calorie calculation)", reply_markup=kb
+    )
+    return WIZARD_SEX
+
+
 async def _ask_goal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Prompt for primary goal via inline keyboard and return WIZARD_GOAL state."""
     kb = InlineKeyboardMarkup([[
@@ -320,6 +334,7 @@ _ASK_FNS: dict[int, any] = {
     WIZARD_AGE: _ask_age,
     WIZARD_WEIGHT: _ask_weight,
     WIZARD_HEIGHT: _ask_height,
+    WIZARD_SEX: _ask_sex,
     WIZARD_GOAL: _ask_goal,
     WIZARD_FITNESS_LEVEL: _ask_fitness_level,
     WIZARD_WEEKLY_DAYS: _ask_weekly_days,
@@ -373,6 +388,15 @@ async def wizard_height(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return WIZARD_HEIGHT
     context.user_data["profile"]["height_cm"] = h
     return await _advance(update, context, after_field="height_cm")
+
+
+async def wizard_sex_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle biological sex selection button (Male / Female)."""
+    query = update.callback_query
+    await query.answer()
+    sex = query.data.split(":")[2]  # "wiz:sex:male" → "male"
+    context.user_data["profile"]["sex"] = sex
+    return await _advance(update, context, after_field="sex")
 
 
 async def wizard_weekly_days(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -464,7 +488,7 @@ async def wizard_garmin_password(update: Update, context: ContextTypes.DEFAULT_T
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
-        garmin_daily_stats.initial_login(uid, email, password)
+        garmin.initial_login(uid, email, password)
         await update.message.reply_text("✅ Garmin Connect linked!")
     except GarminConnectAuthenticationError:
         await update.message.reply_text(
@@ -517,6 +541,7 @@ def build_wizard_handler() -> ConversationHandler:
             WIZARD_AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, wizard_age)],
             WIZARD_WEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, wizard_weight)],
             WIZARD_HEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, wizard_height)],
+            WIZARD_SEX: [CallbackQueryHandler(wizard_sex_cb, pattern=r"^wiz:sex:")],
             WIZARD_GOAL: [CallbackQueryHandler(wizard_goal_cb, pattern=r"^wiz:goal:")],
             WIZARD_FITNESS_LEVEL: [CallbackQueryHandler(wizard_fitness_cb, pattern=r"^wiz:fitness:")],
             WIZARD_WEEKLY_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, wizard_weekly_days)],

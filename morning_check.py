@@ -21,7 +21,7 @@ load_dotenv()  # must run before local imports so AWS env vars are set before bo
 
 from telegram import Bot
 
-import garmin_daily_stats
+import garmin
 import storage
 from briefing import send_morning_briefing
 
@@ -54,7 +54,7 @@ async def _check_and_send(
 
     if alarm_time == "sleep":
         try:
-            garmin_data = garmin_daily_stats.fetch_daily_stats(user_id_str, force_refresh=True)
+            garmin_data = garmin.fetch_daily_stats(user_id_str, force_refresh=True)
             garmin_dict = garmin_data or {}
 
             # 1. Official Garmin wake time from sleep summary.

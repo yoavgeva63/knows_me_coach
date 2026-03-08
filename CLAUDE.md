@@ -17,13 +17,20 @@ and runs as a systemd service on Oracle Cloud Free Tier (Ubuntu 22.04).
 | File | Responsibility |
 |---|---|
 | `bot.py` | Telegram entry point — command handlers, briefing button callbacks, tool execution |
-| `brain.py` | **All** Claude API calls — conversation (with action tools), workout briefing, fact extraction |
+| `brain/conversation.py` | Main coach chat — `SYSTEM_PROMPT`, `ACTION_TOOLS`, `get_claude_response` |
+| `brain/workout.py` | Structured morning briefing — `get_workout_briefing` |
+| `brain/nutrition.py` | Meal suggestions — `get_meal_suggestions`, `get_ingredient_meal` |
+| `brain/memory.py` | Long-term fact extraction — `extract_memorable_facts` |
+| `brain/__init__.py` | Re-exports all public brain functions; **only module that imports `anthropic`** |
 | `storage.py` | **Only** module that touches DynamoDB / boto3 |
 | `briefing.py` | Morning briefing — build message, inline keyboard, cache workout, send |
-| `profile_wizard.py` | `/start` + `/profile` ConversationHandler wizard (8-field setup) |
+| `profile_wizard.py` | `/start` + `/profile` ConversationHandler wizard (9-field setup, includes height) |
+| `nutrition.py` | Macro formula (Mifflin-St Jeor), daily totals, message formatters, Claude prompt builders |
+| `nutrition_handlers.py` | Telegram routing — ingredient ConversationHandler + `nutr:` callback dispatcher |
 | `workout_recommender.py` | Build workout prompt from Garmin + profile, call `brain.get_workout_briefing` |
-| `garmin_daily_stats.py` | Fetch today's Garmin stats (sleep, HRV, steps, activities) |
-| `garmin_activity_analyzer.py` | Weekly activity analysis from Garmin data |
+| `garmin/daily_stats.py` | Fetch today's Garmin stats (sleep, HRV, steps, activities) |
+| `garmin/activity_analyzer.py` | Weekly activity analysis from Garmin data |
+| `garmin/__init__.py` | Re-exports `fetch_daily_stats`, `initial_login`, `analyze_week` for clean imports |
 | `recovery.py` | Pure-rules recovery tier classification |
 | `proccess_explanation.md` | Developer ops guide (SSH, deploy, systemd) |
 | `requirements.txt` | Python dependencies |
@@ -32,14 +39,15 @@ and runs as a systemd service on Oracle Cloud Free Tier (Ubuntu 22.04).
 **Detailed feature docs → `docs/` folder** (read the relevant file before touching a feature):
 - `docs/briefing_system.md` — morning briefing flow, inline buttons, workout caching
 - `docs/profile_wizard.md` — wizard states, field map, skip-filled logic
+- `docs/nutrition.md` — nutrition flow, macro formula, DynamoDB schema, callback routing, ingredient ConversationHandler
 
 ---
 
 ## Architecture Rules (enforce every time)
 
-1. **All Claude calls go through `brain.py`** — no other module imports `anthropic`.
+1. **All Claude calls go through the `brain/` package** — no other module imports `anthropic`.
 2. **All DynamoDB access goes through `storage.py`** — no other module imports `boto3`.
-3. **All Garmin auth/session logic stays in `garmin_daily_stats.py`**.
+3. **All Garmin auth/session logic stays in `garmin/daily_stats.py`**.
 4. **Single responsibility** — before adding logic to a module, check it belongs there.
 5. **No duplication** — before writing a helper, check if one already exists.
 6. **Error handling at boundaries** — catch at Telegram handlers and external API calls; let internal functions bubble up.
@@ -95,10 +103,10 @@ Local dev: `venv\Scripts\activate` then `python bot.py`
 
 1. Read the relevant module(s) and `docs/` file before writing any code.
 2. Follow the module's existing patterns exactly.
-3. New external service → new dedicated module (like `garmin_daily_stats.py`).
+3. New external service → new dedicated module or package (like `garmin/`).
 4. New persistence → add to `storage.py` only.
-5. New Claude call → add to `brain.py` only.
-6. New natural language action → add tool to `ACTION_TOOLS` in `brain.py` + handler in `bot.py`.
+5. New Claude call → add to the relevant `brain/` submodule only.
+6. New natural language action → add tool to `ACTION_TOOLS` in `brain/conversation.py` + handler in `bot.py`.
 7. Update `requirements.txt` if new packages are needed.
 8. **Update `CLAUDE.md` file map and the relevant `docs/` file when done.**
    If no `docs/` file exists for the feature yet, create one under `docs/<feature>.md`.

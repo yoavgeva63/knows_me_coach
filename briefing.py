@@ -11,7 +11,7 @@ import requests
 from garminconnect import GarminConnectAuthenticationError
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
-import garmin_daily_stats
+import garmin
 import storage
 from workout_recommender import get_workout_recommendation
 
@@ -89,9 +89,14 @@ def fetch_weather() -> str:
 
 
 def md_to_html(text: str) -> str:
-    """Convert Claude's Markdown to Telegram HTML (bold only)."""
+    """Convert Claude's Markdown to Telegram HTML (bold only).
+
+    Handles both **double** and *single* asterisk bold markers.
+    Double asterisks are converted first to avoid double-processing.
+    """
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
+    text = re.sub(r'\*([^*\n]+?)\*', r'<b>\1</b>', text)
     return text
 
 
@@ -134,7 +139,7 @@ async def send_morning_briefing(
     history = storage.load_history(user_id_str)
 
     try:
-        garmin_data = garmin_daily_stats.fetch_daily_stats(user_id_str, force_refresh=True)
+        garmin_data = garmin.fetch_daily_stats(user_id_str, force_refresh=True)
     except GarminConnectAuthenticationError:
         await bot.send_message(chat_id, "Couldn't connect to Garmin — run /connect_garmin to link your account.")
         return

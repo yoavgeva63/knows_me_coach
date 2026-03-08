@@ -56,7 +56,7 @@ def analyze_week(activities: list) -> dict:
     Summarise the current week's training from a list of recent Garmin activities.
 
     Args:
-        activities: List of activity dicts (from garmin._fetch_recent_activities).
+        activities: List of activity dicts (from garmin.fetch_daily_stats()).
                     Each dict has: name, type, start_time, duration_seconds,
                     distance_meters, avg_hr, calories.
 
