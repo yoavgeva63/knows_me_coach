@@ -58,20 +58,31 @@ async def _check_and_send(
             garmin_dict = garmin_data or {}
 
             # 1. Official Garmin wake time from sleep summary.
+            #    Require wake_time >= 05:00 local time to ignore brief nighttime wakings.
             wake_utc_str = garmin_dict.get("sleep", {}).get("wake_time_utc")
+            has_early_wake = False  # woke before 05:00 — likely a bathroom trip, not morning
             if wake_utc_str:
                 wake_utc = datetime.fromisoformat(wake_utc_str)
                 wake_israel = wake_utc + timedelta(hours=_ISRAEL_UTC_OFFSET_H)
                 if wake_israel.strftime("%Y-%m-%d") == today_israel and now_utc >= wake_utc:
-                    logger.info(
-                        "Garmin wake detected for %s at %s (Israel).",
-                        user_id_str, wake_israel.strftime("%H:%M"),
-                    )
-                    should_send = True
+                    if wake_israel.hour >= 5:
+                        logger.info(
+                            "Garmin wake detected for %s at %s (Israel).",
+                            user_id_str, wake_israel.strftime("%H:%M"),
+                        )
+                        should_send = True
+                    else:
+                        has_early_wake = True
+                        logger.info(
+                            "Garmin wake at %s is before 05:00 — treating as nighttime waking, skipping.",
+                            wake_israel.strftime("%H:%M"),
+                        )
 
             # 2. Step-based fallback: steps sync faster than sleep summaries.
             #    Only active 06:00–16:00 to avoid bathroom trips at night.
-            if not should_send and "06:00" <= now_hhmm <= "16:00":
+            #    Skip if Garmin already reported an early wake (steps from that waking
+            #    persist in today's total and would cause a false trigger at 06:00).
+            if not should_send and not has_early_wake and "06:00" <= now_hhmm <= "16:00":
                 steps_info = garmin_dict.get("steps", {})
                 total_steps = steps_info.get("total_steps", 0) if isinstance(steps_info, dict) else 0
                 if total_steps > 100:
