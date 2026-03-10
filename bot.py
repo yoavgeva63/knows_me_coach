@@ -4,6 +4,7 @@ Run this file directly to test the bot locally with long-polling.
 
 For production, the Lambda handler (lambda_handler.py) handles webhook updates instead.
 """
+import asyncio
 import logging
 import os
 import re
@@ -208,7 +209,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("Welcome! Please run /start to set up your profile first.")
         return
 
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    chat_id = update.effective_chat.id
+
+    async def _keep_typing() -> None:
+        while True:
+            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            await asyncio.sleep(4)
+
+    typing_task = asyncio.create_task(_keep_typing())
 
     history = storage.load_history(str(user_id))
     weather = fetch_weather()
@@ -223,11 +231,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             history, user_text, weather, garmin_data, profile, daily_workout, logged_meals
         )
     except Exception as exc:
+        typing_task.cancel()
         logger.error("Claude error: %s", exc)
         await update.message.reply_text(
             "Sorry, I had trouble thinking just now. Please try again in a moment."
         )
         return
+
+    typing_task.cancel()
 
     briefing_triggered = False
     for call in tool_calls:
@@ -241,13 +252,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 storage.add_coach_note(str(user_id), inp["fact"])
                 logger.info("Tool: remember_fact for user %s: %s", user_id, inp["fact"])
             elif name == "trigger_morning_briefing":
-                # Guard: skip if briefing already sent today (daily_workout date matches today).
-                if daily_workout and daily_workout.get("date") == today_str:
-                    logger.info("Tool: trigger_morning_briefing skipped — already sent today for %s", user_id)
-                else:
-                    await send_morning_briefing(context.bot, update.effective_chat.id, str(user_id))
-                    briefing_triggered = True
-                    logger.info("Tool: trigger_morning_briefing for user %s", user_id)
+                await send_morning_briefing(context.bot, update.effective_chat.id, str(user_id))
+                briefing_triggered = True
+                logger.info("Tool: trigger_morning_briefing for user %s", user_id)
             elif name == "update_daily_workout":
                 if not storage.load_daily_workout(str(user_id), today_str):
                     base = get_workout_recommendation(garmin_data, profile, weather, history)
