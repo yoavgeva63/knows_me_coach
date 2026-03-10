@@ -303,8 +303,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     storage.save_history(str(user_id), history)
 
-    typing_task.cancel()
     await update.message.reply_text(md_to_html(reply), parse_mode="HTML")
+    typing_task.cancel()
 
 
 async def handle_briefing_action(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
