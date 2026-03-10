@@ -227,8 +227,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logged_meals = storage.get_meals_from_profile(profile, today_str)
 
     try:
-        reply, tool_calls = get_claude_response(
-            history, user_text, weather, garmin_data, profile, daily_workout, logged_meals
+        loop = asyncio.get_event_loop()
+        reply, tool_calls = await loop.run_in_executor(
+            None,
+            lambda: get_claude_response(
+                history, user_text, weather, garmin_data, profile, daily_workout, logged_meals
+            ),
         )
     except Exception as exc:
         typing_task.cancel()
@@ -237,8 +241,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "Sorry, I had trouble thinking just now. Please try again in a moment."
         )
         return
-
-    typing_task.cancel()
 
     briefing_triggered = False
     for call in tool_calls:
@@ -301,6 +303,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     storage.save_history(str(user_id), history)
 
+    typing_task.cancel()
     await update.message.reply_text(md_to_html(reply), parse_mode="HTML")
 
 
