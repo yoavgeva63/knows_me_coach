@@ -79,16 +79,17 @@ async def _check_and_send(
                         )
 
             # 2. Step-based fallback: steps sync faster than sleep summaries.
-            #    Only active 06:00–16:00 to avoid bathroom trips at night.
-            #    Skip if Garmin already reported an early wake (steps from that waking
-            #    persist in today's total and would cause a false trigger at 06:00).
+            #    Uses recent_steps (last 60 min) instead of total daily steps so that
+            #    steps taken at 01:00 AM don't trigger the briefing at 06:00.
+            #    Window 06:00–16:00 prevents false positives from late-night activity
+            #    when sleep data hasn't synced yet (has_early_wake would be False).
             if not should_send and not has_early_wake and "06:00" <= now_hhmm <= "16:00":
                 steps_info = garmin_dict.get("steps", {})
-                total_steps = steps_info.get("total_steps", 0) if isinstance(steps_info, dict) else 0
-                if total_steps > 100:
+                recent_steps = steps_info.get("recent_steps", 0) if isinstance(steps_info, dict) else 0
+                if recent_steps > 200:
                     logger.info(
-                        "Step-based wake detected for %s (%d steps).",
-                        user_id_str, total_steps,
+                        "Step-based wake detected for %s (%d recent steps in last 60 min).",
+                        user_id_str, recent_steps,
                     )
                     should_send = True
             

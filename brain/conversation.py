@@ -9,7 +9,7 @@ trigger side-effects (set alarm, remember fact, etc.) within a single response.
 from datetime import datetime, timezone
 
 from brain._client import _get_client
-from brain._context import clean_history, format_garmin_context, format_profile_context
+from brain._context import clean_history, format_garmin_context, format_nutrition_context, format_profile_context
 
 
 SYSTEM_PROMPT = """You are a proactive, knowledgeable, and motivating personal fitness and health coach \
@@ -34,6 +34,11 @@ Your communication style:
 
 When you don't have data (e.g. no Garmin sync yet) assume from the past and tell the user.
 Always respond in the same language the user writes in.
+
+Nutrition behaviour:
+- Always treat any mentioned meal as ONE meal in a normal multi-meal day. Never assume it covers the whole day.
+- When nutrition context is provided below, use it to calculate how many calories/macros remain and suggest accordingly.
+- If no meals are logged yet and the user asks about food, ask what they've already eaten before recommending a full plan.
 
 For destructive or complex actions, never execute directly — instead guide the user to confirm:
 - Clear conversation history → "To erase our conversation history, tap /clear to confirm."
@@ -120,6 +125,7 @@ def get_claude_response(
     garmin_data: dict | None = None,
     user_profile: dict | None = None,
     daily_workout: dict | None = None,
+    logged_meals: list[dict] | None = None,
 ) -> tuple[str, list[dict]]:
     """Send the conversation history + new user message to Claude and return the reply.
 
@@ -134,6 +140,8 @@ def get_claude_response(
         garmin_data: Latest Garmin daily stats (injected into system prompt when available).
         user_profile: User profile dict including coach_notes (injected into system prompt).
         daily_workout: Today's cached workout plan (injected into system prompt when available).
+        logged_meals: Today's logged meals from storage.get_meals_from_profile(). Pass only when
+            the user's message is nutrition-related. None means skip injection entirely.
 
     Returns:
         Tuple of (reply_text, tool_calls) where tool_calls is a list of
@@ -151,6 +159,8 @@ def get_claude_response(
         system += f"\n\nLatest Garmin data (fetched at {fetch_time}):\n{format_garmin_context(garmin_data)}"
     if daily_workout and daily_workout.get("workout_recommendation"):
         system += f"\n\nToday's cached workout plan:\n{daily_workout['workout_recommendation']}"
+    if logged_meals is not None and user_profile:
+        system += f"\n\n{format_nutrition_context(user_profile, logged_meals)}"
 
     messages = clean_history(conversation_history + [{"role": "user", "content": user_message}])
 

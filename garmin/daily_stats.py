@@ -12,7 +12,7 @@ Public API:
 
 import logging
 import time
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
 
 from garminconnect import Garmin, GarminConnectAuthenticationError
 
@@ -87,7 +87,6 @@ def _fetch_sleep(client: Garmin, day: str) -> dict:
         wake_ts_ms = daily.get("sleepEndTimestampLocal")
         wake_time_iso = None
         if wake_ts_ms:
-            from datetime import datetime, timezone
             wake_time_iso = datetime.fromtimestamp(
                 wake_ts_ms / 1000, tz=timezone.utc
             ).isoformat()
@@ -121,11 +120,46 @@ def _fetch_hrv(client: Garmin, day: str) -> dict:
         return {"error": str(exc)}
 
 
+_RECENT_STEPS_WINDOW_MINUTES = 60
+
+
 def _fetch_steps(client: Garmin, day: str) -> dict:
+    """Fetch step buckets for *day* and return total and recent step counts.
+
+    Args:
+        client: Authenticated Garmin client.
+        day:    ISO date string (YYYY-MM-DD).
+
+    Returns:
+        {
+            "total_steps":  int  — cumulative steps for the whole day,
+            "recent_steps": int  — steps in buckets that started within the last
+                                   _RECENT_STEPS_WINDOW_MINUTES minutes (UTC).
+        }
+    """
     try:
         buckets = client.get_steps_data(day)
         total = sum(entry.get("steps", 0) for entry in buckets)
-        return {"total_steps": total}
+
+        # Sum only buckets that started within the recent window.
+        # Bucket timestamps are in UTC under the "startGMT" key,
+        # format: "2026-03-09T22:00:00.0"
+        cutoff_utc = datetime.now(timezone.utc) - timedelta(minutes=_RECENT_STEPS_WINDOW_MINUTES)
+        recent_steps = 0
+        for entry in buckets:
+            ts_str = entry.get("startGMT")
+            if not ts_str:
+                continue
+            try:
+                bucket_start = datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%f").replace(
+                    tzinfo=timezone.utc
+                )
+                if bucket_start >= cutoff_utc:
+                    recent_steps += entry.get("steps", 0)
+            except ValueError:
+                pass
+
+        return {"total_steps": total, "recent_steps": recent_steps}
     except Exception as exc:
         return {"error": str(exc)}
 

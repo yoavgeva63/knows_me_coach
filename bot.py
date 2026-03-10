@@ -37,6 +37,22 @@ from workout_recommender import get_workout_recommendation
 
 load_dotenv()
 
+# Keywords that signal a nutrition-related message. When matched, today's logged
+# meals are fetched from the already-loaded profile and passed to the coach.
+_NUTRITION_KEYWORDS = frozenset({
+    "eat", "eating", "ate", "eaten", "food", "meal", "meals", "lunch", "dinner",
+    "breakfast", "snack", "calories", "calorie", "protein", "carb", "carbs", "fat",
+    "diet", "nutrition", "hungry", "hunger", "fridge", "cook", "recipe", "macro",
+    "macros", "kcal", "ingredient", "ingredients",
+})
+
+
+def _is_nutrition_message(text: str) -> bool:
+    """Return True if the message likely relates to food or nutrition."""
+    words = re.findall(r"[a-z]+", text.lower())
+    return bool(_NUTRITION_KEYWORDS.intersection(words))
+
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -198,8 +214,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     weather = fetch_weather()
     garmin_data = garmin.fetch_daily_stats(str(user_id))
 
+    logged_meals: list[dict] | None = None
+    if _is_nutrition_message(user_text):
+        logged_meals = storage.get_meals_from_profile(profile, today_str)
+
     try:
-        reply, tool_calls = get_claude_response(history, user_text, weather, garmin_data, profile, daily_workout)
+        reply, tool_calls = get_claude_response(
+            history, user_text, weather, garmin_data, profile, daily_workout, logged_meals
+        )
     except Exception as exc:
         logger.error("Claude error: %s", exc)
         await update.message.reply_text(

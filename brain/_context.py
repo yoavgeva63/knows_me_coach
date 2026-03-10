@@ -1,10 +1,12 @@
 """
 Private context-formatting helpers shared across the brain package.
 
-These functions convert raw data (Garmin stats, user profile, conversation history)
-into plain-text strings ready to be injected into Claude system/user prompts.
+These functions convert raw data (Garmin stats, user profile, conversation history,
+nutrition) into plain-text strings ready to be injected into Claude system/user prompts.
 None of these functions make API calls.
 """
+
+from nutrition import calculate_macros, compute_remaining, compute_totals
 
 
 def _fmt_seconds(s) -> str:
@@ -107,14 +109,50 @@ def format_profile_context(user_profile: dict) -> str:
     return "\n".join(lines)
 
 
+def format_nutrition_context(profile: dict, logged_meals: list[dict]) -> str:
+    """Format today's nutrition status for injection into the Claude system prompt.
+
+    Args:
+        profile:      User profile dict (used to derive daily macro targets).
+        logged_meals: Meals logged today from storage.get_meals_from_profile().
+
+    Returns:
+        Multi-line string covering daily targets, meals eaten, and remaining macros.
+    """
+    targets = calculate_macros(profile)
+    lines = [
+        "## Today's Nutrition",
+        f"Daily targets: {targets['kcal']} kcal | {targets['protein_g']}g protein | "
+        f"{targets['fat_g']}g fat | {targets['carbs_g']}g carbs",
+    ]
+
+    if logged_meals:
+        for m in logged_meals:
+            lines.append(
+                f"- {m['slot'].capitalize()}: {m['name']} — "
+                f"{m['kcal']} kcal | {m['protein_g']}g protein | "
+                f"{m['fat_g']}g fat | {m['carbs_g']}g carbs"
+            )
+        totals = compute_totals(logged_meals)
+        remaining = compute_remaining(targets, logged_meals)
+        lines.append(
+            f"Eaten so far: {totals['kcal']} kcal | {totals['protein_g']}g protein | "
+            f"{totals['fat_g']}g fat | {totals['carbs_g']}g carbs"
+        )
+        lines.append(
+            f"Remaining: {remaining['kcal']} kcal | {remaining['protein_g']}g protein | "
+            f"{remaining['fat_g']}g fat | {remaining['carbs_g']}g carbs"
+        )
+    else:
+        lines.append("No meals logged yet today.")
+
+    return "\n".join(lines)
+
+
 def clean_history(conversation_history: list[dict]) -> list[dict]:
     """Prepare conversation history for the Anthropic API (role + content only).
 
     User messages are prefixed with their date so Claude can judge temporal relevance.
-    Assistant messages are left as-is — stamping them would cause Claude to mimic the
-    [YYYY-MM-DD] format in its own replies.
-    Old messages without a ts field (pre-feature) are passed through unchanged.
-
     Args:
         conversation_history: Raw history list from storage.load_history().
 

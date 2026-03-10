@@ -273,6 +273,23 @@ def load_daily_meals(user_id: str, date_str: str) -> list[dict]:
     return _get_nutrition(profile).get("daily_meals", {}).get(date_str, [])
 
 
+def get_meals_from_profile(profile: dict, date_str: str) -> list[dict]:
+    """Extract today's logged meals from an already-loaded profile dict.
+
+    Avoids a redundant DynamoDB fetch when the caller has already called
+    load_user_data() and has the profile in memory.
+
+    Args:
+        profile:  Profile dict returned by load_user_data() or load_profile().
+        date_str: Today's date as YYYY-MM-DD.
+
+    Returns:
+        List of meal dicts (may be empty). Each dict has: name, slot, kcal,
+        protein_g, fat_g, carbs_g, logged_at.
+    """
+    return _get_nutrition(profile).get("daily_meals", {}).get(date_str, [])
+
+
 def save_daily_meal(user_id: str, date_str: str, meal: dict) -> None:
     """Append a logged meal to today's list and prune entries older than 7 days.
 
