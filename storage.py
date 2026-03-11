@@ -235,6 +235,27 @@ def save_daily_workout(user_id: str, workout: dict, date_str: str) -> None:
     save_profile(user_id, profile)
 
 
+def save_daily_workout_and_history(user_id: str, workout: dict, date_str: str) -> None:
+    """Cache today's workout and append its summary to workout_history in a single write.
+
+    Combines save_daily_workout + append_workout_history to avoid two DynamoDB round-trips.
+
+    Args:
+        workout:  Dict with keys: summary, motivation, workout_recommendation, recovery_tier.
+        date_str: Today's date as YYYY-MM-DD.
+    """
+    profile = load_profile(user_id)
+    profile["daily_workout"] = {"date": date_str, **workout}
+
+    history: list[dict] = profile.get("workout_history", [])
+    history.append({"date": date_str, "summary": workout["summary"]})
+    if len(history) > _MAX_WORKOUT_HISTORY:
+        history = history[-_MAX_WORKOUT_HISTORY:]
+    profile["workout_history"] = history
+
+    save_profile(user_id, profile)
+
+
 # ---------------------------------------------------------------------------
 # Garmin tokens
 # ---------------------------------------------------------------------------
@@ -401,6 +422,32 @@ def clear_pending_meal_options(user_id: str) -> None:
     """Remove pending meal options after the user has logged or dismissed them."""
     profile = load_profile(user_id)
     _get_nutrition(profile).pop("pending_options", None)
+    save_profile(user_id, profile)
+
+
+# ---------------------------------------------------------------------------
+# Workout history (rolling 7-day log, used when Garmin data is unavailable)
+# ---------------------------------------------------------------------------
+
+_MAX_WORKOUT_HISTORY = 14  # 7 days × 2 sessions/day buffer
+
+
+def append_workout_history(user_id: str, entries: list[dict]) -> None:
+    """Append one or more workout summary entries and prune to the last 14.
+
+    Each entry must have: {"date": "YYYY-MM-DD", "summary": str}.
+    Entries are kept in chronological order. Oldest entries are dropped when
+    the list exceeds _MAX_WORKOUT_HISTORY.
+
+    Args:
+        entries: List of dicts with 'date' and 'summary' keys.
+    """
+    profile = load_profile(user_id)
+    history: list[dict] = profile.get("workout_history", [])
+    history.extend(entries)
+    if len(history) > _MAX_WORKOUT_HISTORY:
+        history = history[-_MAX_WORKOUT_HISTORY:]
+    profile["workout_history"] = history
     save_profile(user_id, profile)
 
 

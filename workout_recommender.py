@@ -10,7 +10,7 @@ Flow:
 Claude never sees raw HRV numbers — only the tier, its meaning, and constraints.
 """
 
-from datetime import date
+from datetime import date, timedelta
 
 from brain import get_workout_briefing
 from recovery import classify_recovery
@@ -74,42 +74,101 @@ def _event_blurb(target_event: dict) -> str:
 
 
 
+def _build_week_schedule(daily_map: dict[str, list[str]]) -> str:
+    """Format the day-indexed activity map into a readable schedule block.
+
+    Shows the rolling 7 days ending yesterday. Today is omitted (that's what we're deciding).
+    """
+    today = date.today()
+    lines = []
+    for offset in range(7, 0, -1):   # 7 days ago → yesterday
+        day = today - timedelta(days=offset)
+        day_name = f"{day.strftime('%a')} {day.day} {day.strftime('%b')}"
+        sessions = daily_map.get(day.isoformat(), [])
+        if sessions:
+            lines.append(f"  {day_name}: " + " | ".join(sessions))
+        else:
+            lines.append(f"  {day_name}: Rest")
+    return "\n".join(lines) if lines else "  No days logged yet"
+
+
+def _build_history_schedule(workout_history: list[dict]) -> str:
+    """Format saved workout_history entries into a readable schedule block.
+
+    Used for non-Garmin users. Multiple entries on the same date (double sessions)
+    are shown on the same line separated by ' | '.
+    """
+    today = date.today()
+    by_date: dict[str, list[str]] = {}
+    for entry in workout_history:
+        d = entry.get("date", "")
+        s = entry.get("summary", "")
+        if d and s:
+            by_date.setdefault(d, []).append(s)
+
+    lines = []
+    for offset in range(7, 0, -1):   # 7 days ago → yesterday
+        day = today - timedelta(days=offset)
+        day_name = f"{day.strftime('%a')} {day.day} {day.strftime('%b')}"
+        sessions = by_date.get(day.isoformat(), [])
+        if sessions:
+            lines.append(f"  {day_name}: " + " | ".join(sessions))
+        else:
+            lines.append(f"  {day_name}: Rest")
+    return "\n".join(lines) if lines else "  No workout history recorded yet"
+
+
 def get_workout_recommendation(
     garmin_data: dict,
     user_profile: dict,
     weather: str = "",
     conversation_history: list[dict] | None = None,
+    previous_workout: str | None = None,
+    workout_history: list[dict] | None = None,
 ) -> dict:
     """
     Generate a personalised morning workout recommendation.
 
     Args:
-        garmin_data:          Output of garmin.fetch_daily_stats().
+        garmin_data:          Output of garmin.fetch_daily_stats(), or {} for non-Garmin users.
         user_profile:         User profile dict including coach_notes.
         weather:              One-line weather string (optional).
         conversation_history: Prior conversation messages — gives Claude context
                               about things discussed before /morning was called.
+        previous_workout:     Yesterday's cached workout_recommendation text — lets
+                              Claude know which muscle groups were trained last.
+        workout_history:      Rolling list of {date, summary} dicts from storage.
+                              Primary training history source for non-Garmin users;
+                              supplemental context for Garmin users.
 
     Returns:
         {
-            "recommendation": str,   # Claude's full workout text
-            "recovery_tier":  str,   # "high" | "moderate" | "low" | "very_low"
+            "summary":                str,
+            "motivation":             str,
+            "workout_recommendation": str,
+            "recovery_tier":          str | None,  # None when no Garmin data
         }
     """
-    # ── 1. Classify recovery (rules only) ────────────────────────────────────
-    sleep = garmin_data.get("sleep", {})
-    hrv = garmin_data.get("hrv", {})
+    has_garmin = bool(garmin_data)
 
-    recovery = classify_recovery(
-        sleep_score=sleep.get("sleep_score"),
-        hrv_last_night=hrv.get("last_night_avg"),
-        hrv_weekly_avg=hrv.get("weekly_avg"),
-    )
+    # ── 1. Classify recovery (rules only, Garmin users only) ─────────────────
+    if has_garmin:
+        sleep = garmin_data.get("sleep", {})
+        hrv = garmin_data.get("hrv", {})
+        recovery = classify_recovery(
+            sleep_score=sleep.get("sleep_score"),
+            hrv_last_night=hrv.get("last_night_avg"),
+            hrv_weekly_avg=hrv.get("weekly_avg"),
+        )
+        tier: str | None = recovery["tier"]
+    else:
+        recovery = None
+        tier = None
 
-    # ── 2. Analyse workout history (rules only) ───────────────────────────────
-    history = analyze_week(garmin_data.get("recent_activities", []))
+    # ── 2. Analyse workout history from Garmin (Garmin users only) ────────────
+    week_analysis = analyze_week(garmin_data.get("recent_activities", [])) if has_garmin else None
 
-    # ── 3. Assemble prompt context ────────────────────────────────────────────
+    # ── 3. Assemble common prompt fields ─────────────────────────────────────
     name = user_profile.get("name", "Athlete")
     age = user_profile.get("age", "N/A")
     weight = user_profile.get("weight_kg", "N/A")
@@ -121,30 +180,61 @@ def get_workout_recommendation(
     secondary_goal = user_profile.get("secondary_goal", "")
     weekly_days = (
         user_profile.get("weekly_training_days")
-        or user_profile.get("workouts_per_week", 5)
+        or user_profile.get("workouts_per_week", 4)
     )
     session_duration = user_profile.get("preferred_session_duration_minutes", 60)
     event_blurb = _event_blurb(user_profile.get("target_event", {}))
     coach_notes = user_profile.get("coach_notes", [])
 
-    tier = recovery["tier"]
-
-    # Week summary lines
-    week_lines = history["last_week_activities"]
-    week_summary = (
-        "\n".join(f"  - {line}" for line in week_lines)
-        if week_lines
-        else "  - No sessions recorded this week yet"
-    )
-    hours_since = history["hours_since_last_workout"]
-    hours_str = f"{hours_since:.0f} hours ago" if hours_since is not None else "unknown"
-
-    # ── 4. Build the prompt ───────────────────────────────────────────────────
     coach_notes_block = ""
     if coach_notes:
         notes_lines = "\n".join(f"  - {n.get('date', '?')}: {n.get('note', '')}" for n in coach_notes)
         coach_notes_block = f"\n## Coach Notes (long-term memory — respect these)\n{notes_lines}"
 
+    previous_workout_block = ""
+    if previous_workout:
+        previous_workout_block = f"\n## Yesterday's Workout Plan (written by you)\n{previous_workout}\n"
+
+    # ── 4. Build the training context block (differs by Garmin availability) ──
+    if has_garmin:
+        hours_since = week_analysis["hours_since_last_workout"]
+        hours_str = f"{hours_since:.0f} hours ago" if hours_since is not None else "unknown"
+        consecutive = week_analysis["consecutive_training_days"]
+        week_schedule = _build_week_schedule(week_analysis["daily_activity_map"])
+
+        training_context_block = f"""## Today's Recovery — {recovery["label"]}
+{_TIER_CONTEXT[tier]}
+Coaching note: {recovery["note"]}
+Intensity ceiling: {recovery["intensity_ceiling"]} (max RPE {recovery["max_rpe"]}/10)
+
+## Training — Last 7 Days (rolling, from Garmin)
+{week_schedule}
+- Sessions: {week_analysis["total_sessions_this_week"]}
+- Km run: {week_analysis["km_run_this_week"]} km
+- Gym sessions: {week_analysis["gym_sessions_this_week"]}
+- Consecutive training days: {consecutive}
+- Last workout: {hours_str}"""
+
+        intensity_ceiling_note = (
+            f"recovery is very low.\n"
+            f"Respect the intensity ceiling: {recovery['intensity_ceiling']} (max RPE {recovery['max_rpe']}/10)."
+        )
+        workout_rec_closer = "Close with a coaching note referencing today's recovery and load."
+    else:
+        history_schedule = _build_history_schedule(workout_history or [])
+        training_context_block = f"""## No Biometric Data (Garmin not connected)
+Base your rest/train decision purely on training load: consecutive days, session types, and muscle group overlap.
+
+## Training — Last 7 Days (rolling, from saved history)
+{history_schedule}"""
+
+        intensity_ceiling_note = (
+            "no biometric data is available.\n"
+            "Default to moderate intensity unless the training load clearly calls for rest or active recovery."
+        )
+        workout_rec_closer = "Close with a brief coaching note on load or muscle group rationale."
+
+    # ── 5. Assemble the full prompt ───────────────────────────────────────────
     prompt = f"""You are a personal fitness coach writing a morning workout recommendation.
 
 ## Athlete
@@ -154,35 +244,40 @@ def get_workout_recommendation(
 {f"- {event_blurb}" if event_blurb else ""}
 - Weekly training days: {weekly_days} | Preferred session: {session_duration} min{coach_notes_block}
 
-## Today's Recovery — {recovery["label"]}
-{_TIER_CONTEXT[tier]}
-Coaching note: {recovery["note"]}
-Intensity ceiling: {recovery["intensity_ceiling"]} (max RPE {recovery["max_rpe"]}/10)
-
-## This Week's Training So Far
-{week_summary}
-- Sessions this week: {history["total_sessions_this_week"]}
-- Km run this week: {history["km_run_this_week"]} km
-- Gym sessions this week: {history["gym_sessions_this_week"]}
-- Last workout: {hours_str}
-- Trained yesterday: {"Yes" if history["trained_yesterday"] else "No"}
-
+{training_context_block}
+{previous_workout_block}
 ## Weather
 {weather if weather else "N/A"}
 
 ## Your Task
-Write today's morning briefing for {name}:
+Decide whether {name} should train today, then write the morning briefing.
+
+**Rest day decision:** You may recommend a full rest day when the training load warrants it —
+for example, too many consecutive days relative to the target of {weekly_days} days/week with no break, or \
+{intensity_ceiling_note}
+Use the day-by-day schedule above and yesterday's workout to judge muscle group overlap and accumulated fatigue.
+A rest day is the right call when training today would be counterproductive.
+
+If training:
 - summary: one sentence — workout type and RPE (e.g. "Push day — RPE 7, heavy compound work (~60 min)")
-- motivation: one sentence drawing on the athlete's goal or recent context — no fluff
-- workout_recommendation: start directly with the workout title and structure (no greeting, no recovery recap). Then the full detailed session plan. Close with a single coaching note referencing today's recovery tier (e.g. "Recovery is solid today — feel free to push." or "Recovery is moderate — keep 1-2 reps in the tank on every set."). Be specific:
+- workout_recommendation: start directly with the workout title and structure (no greeting, no recovery recap). \
+Full detailed session plan. {workout_rec_closer} Be specific:
   - Gym session → exact exercises, sets × reps per exercise
-  - Run → distance, structure (warmup / main set / cooldown), pace guidance via speed or RPE
+  - Run → distance, structure (warmup / main set / cooldown), pace guidance via RPE
   - Active recovery → exactly what to do and for how long
-  Respect the intensity ceiling above. Target ~{session_duration} min total. Concise and actionable — under 230 words.
+  Target ~{session_duration} min total. Under 230 words.
 
-Do not reference or react to any prior conversation in summary or motivation. Use prior context only in workout_recommendation if directly relevant (e.g. user mentioned soreness)."""
+If rest day:
+- summary: one sentence — "Rest day — [brief reason]" (e.g. "Rest day — 4 days in a row, let it consolidate.")
+- workout_recommendation: 2–3 sentences — what to do instead (sleep, walk, stretch) and why this rest \
+serves the goal. No workout plan.
 
-    # ── 5. Call Claude via brain.py (structured output) ──────────────────────
+- motivation: one sentence tied to the athlete's goal — works for both training and rest days.
+
+Do not reference or react to any prior conversation in summary or motivation. Use prior context only in \
+workout_recommendation if directly relevant (e.g. user mentioned soreness)."""
+
+    # ── 6. Call Claude via brain.py (structured output) ──────────────────────
     result = get_workout_briefing(prompt, conversation_history)
 
     return {**result, "recovery_tier": tier}

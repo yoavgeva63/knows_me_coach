@@ -17,7 +17,10 @@ _WORKOUT_BRIEFING_TOOL = {
         "properties": {
             "summary": {
                 "type": "string",
-                "description": "One sentence: workout type and RPE",
+                "description": (
+                    "One sentence: workout type and RPE, or 'Rest day — [brief reason]' "
+                    "if a rest day is recommended."
+                ),
             },
             "motivation": {
                 "type": "string",
@@ -26,8 +29,9 @@ _WORKOUT_BRIEFING_TOOL = {
             "workout_recommendation": {
                 "type": "string",
                 "description": (
-                    "Full workout detail — starts directly with the workout title, no greeting. "
-                    "Ends with a one-line recovery coaching note."
+                    "If training: full workout detail — starts directly with the workout title, no greeting. "
+                    "Ends with a one-line coaching note on recovery and load. "
+                    "If rest day: 2–3 sentences on what to do instead (sleep, walk, stretch) and why it serves the goal."
                 ),
             },
         },

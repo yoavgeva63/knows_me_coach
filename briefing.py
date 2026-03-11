@@ -7,6 +7,8 @@ import re
 import time
 from datetime import datetime, timezone
 
+from datetime import date, timedelta
+
 import requests
 from garminconnect import GarminConnectAuthenticationError
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -127,47 +129,74 @@ async def send_morning_briefing(
 ) -> None:
     """Generate the full workout recommendation, cache it, and send the morning briefing.
 
-    The briefing message shows a short recovery line, workout summary, and motivational
-    sentence — with inline buttons for each topic. The full workout detail is cached in
-    DynamoDB so the Workout button can serve it instantly without a second Claude call.
+    The briefing message shows a short recovery line (Garmin users only), workout summary,
+    and motivational sentence — with inline buttons for each topic. The full workout detail
+    is cached in DynamoDB so the Workout button can serve it instantly without a second call.
+
+    Non-Garmin users skip the recovery line entirely; the workout decision is based on
+    the saved workout_history rolling log.
 
     Marks today as sent in storage on success.
     """
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
     weather = fetch_weather()
     profile = storage.load_profile(user_id_str)
     history = storage.load_history(user_id_str)
 
-    try:
-        garmin_data = garmin.fetch_daily_stats(user_id_str, force_refresh=True)
-    except GarminConnectAuthenticationError:
-        await bot.send_message(chat_id, "Couldn't connect to Garmin — run /connect_garmin to link your account.")
-        return
-    except Exception as exc:
-        logger.error("Garmin fetch error: %s", exc)
-        await bot.send_message(chat_id, "Had trouble fetching your Garmin data. Try again in a moment.")
-        return
+    # Pass yesterday's cached workout so Claude knows which muscle groups were trained.
+    cached = profile.get("daily_workout", {})
+    previous_workout = cached.get("workout_recommendation") if cached.get("date") == yesterday else None
+
+    # Fetch Garmin data only if the user has connected their account.
+    garmin_data: dict = {}
+    has_garmin = bool(profile.get("garmin_tokens"))
+    if has_garmin:
+        try:
+            garmin_data = garmin.fetch_daily_stats(user_id_str, force_refresh=True)
+        except GarminConnectAuthenticationError:
+            await bot.send_message(
+                chat_id,
+                "Couldn't connect to Garmin — run /connect_garmin to re-link your account.",
+            )
+            return
+        except Exception as exc:
+            logger.error("Garmin fetch error: %s", exc)
+            await bot.send_message(chat_id, "Had trouble fetching your Garmin data. Try again in a moment.")
+            return
+
+    workout_history: list[dict] = profile.get("workout_history", [])
 
     try:
-        result = get_workout_recommendation(garmin_data, profile, weather, history)
+        result = get_workout_recommendation(
+            garmin_data, profile, weather, history, previous_workout, workout_history
+        )
     except Exception as exc:
         logger.error("Workout recommendation error: %s", exc)
         await bot.send_message(chat_id, "Had trouble generating your recommendation. Try again in a moment.")
         return
 
-    storage.save_daily_workout(user_id_str, result, today)
+    # Save daily workout and append to history in a single DynamoDB write.
+    storage.save_daily_workout_and_history(user_id_str, result, today)
 
-    tier = result["recovery_tier"]
-    emoji = _RECOVERY_EMOJI.get(tier, "⚪")
-    recovery_line = _build_recovery_line(garmin_data, tier)
     name = profile.get("name", "there")
+    tier = result["recovery_tier"]
 
-    briefing_text = (
-        f"Good morning {name}! 🌅\n"
-        f"{emoji} {recovery_line}\n"
-        f"{result['summary']}\n"
-        f"💪 {result['motivation']}"
-    )
+    if has_garmin and tier:
+        emoji = _RECOVERY_EMOJI.get(tier, "⚪")
+        recovery_line = _build_recovery_line(garmin_data, tier)
+        briefing_text = (
+            f"Good morning {name}! 🌅\n"
+            f"{emoji} {recovery_line}\n"
+            f"{result['summary']}\n"
+            f"💪 {result['motivation']}"
+        )
+    else:
+        briefing_text = (
+            f"Good morning {name}! 🌅\n"
+            f"{result['summary']}\n"
+            f"💪 {result['motivation']}"
+        )
 
     await bot.send_message(
         chat_id,

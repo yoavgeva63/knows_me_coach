@@ -44,7 +44,7 @@ _NUTRITION_KEYWORDS = frozenset({
     "eat", "eating", "ate", "eaten", "food", "meal", "meals", "lunch", "dinner",
     "breakfast", "snack", "calories", "calorie", "protein", "carb", "carbs", "fat",
     "diet", "nutrition", "hungry", "hunger", "fridge", "cook", "recipe", "macro",
-    "macros", "kcal", "ingredient", "ingredients",
+    "macros", "kcal", "ingredient", "ingredients", "nutrition"
 })
 
 
@@ -220,7 +220,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     history = storage.load_history(str(user_id))
     weather = fetch_weather()
-    garmin_data = garmin.fetch_daily_stats(str(user_id))
+    garmin_data = garmin.fetch_daily_stats(str(user_id)) if profile.get("garmin_tokens") else None
 
     logged_meals: list[dict] | None = None
     if _is_nutrition_message(user_text):
@@ -259,8 +259,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.info("Tool: trigger_morning_briefing for user %s", user_id)
             elif name == "update_daily_workout":
                 if not storage.load_daily_workout(str(user_id), today_str):
-                    base = get_workout_recommendation(garmin_data, profile, weather, history)
-                    storage.save_daily_workout(str(user_id), base, today_str)
+                    base = get_workout_recommendation(
+                        garmin_data or {}, profile, weather, history,
+                        workout_history=profile.get("workout_history", []),
+                    )
+                    storage.save_daily_workout_and_history(str(user_id), base, today_str)
                 fields = {"workout_recommendation": inp["workout_recommendation"]}
                 if inp.get("summary"):
                     fields["summary"] = inp["summary"]
@@ -303,7 +306,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     storage.save_history(str(user_id), history)
 
-    await update.message.reply_text(md_to_html(reply), parse_mode="HTML")
+    if not briefing_triggered:
+        await update.message.reply_text(md_to_html(reply), parse_mode="HTML")
     typing_task.cancel()
 
 

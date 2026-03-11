@@ -2,9 +2,10 @@
 Workout history analyser — pure logic, no AI.
 
 Takes the recent activities list from garmin.fetch_daily_stats() and returns
-a weekly summary dict that the workout recommender passes to Claude as context.
+a rolling-7-day summary dict that the workout recommender passes to Claude as context.
 
-"This week" is defined as Monday through today (ISO week).
+"This week" is defined as the rolling 7 days ending yesterday (not the ISO week),
+so a Sunday hard session is never invisible on Monday.
 """
 
 from datetime import datetime, date, timedelta
@@ -62,22 +63,23 @@ def analyze_week(activities: list) -> dict:
 
     Returns:
         {
-            "total_sessions_this_week": int,
-            "km_run_this_week":         float,
-            "gym_sessions_this_week":   int,
-            "hours_since_last_workout": float | None,
-            "last_week_activities":     list[str],   # human-readable per session
-            "trained_yesterday":        bool,
+            "total_sessions_this_week":  int,
+            "km_run_this_week":          float,
+            "gym_sessions_this_week":    int,
+            "hours_since_last_workout":  float | None,
+            "daily_activity_map":        dict[str, list[str]],  # "YYYY-MM-DD" → [label, ...]
+            "consecutive_training_days": int,   # days in a row ending today (or yesterday)
+            "trained_yesterday":         bool,
         }
     """
     today = date.today()
-    week_start = today - timedelta(days=today.weekday())   # Monday of this week
+    week_start = today - timedelta(days=7)   # rolling 7-day window
     yesterday = today - timedelta(days=1)
 
     total_sessions = 0
     km_run = 0.0
     gym_sessions = 0
-    week_labels: list[str] = []
+    daily_map: dict[str, list[str]] = {}   # date ISO → list of session labels
     last_workout_dt: datetime | None = None
     trained_yesterday = False
 
@@ -86,13 +88,11 @@ def analyze_week(activities: list) -> dict:
         if dt is None:
             continue
 
-        # Track the most recent workout across all fetched activities
         if last_workout_dt is None or dt > last_workout_dt:
             last_workout_dt = dt
 
         act_date = dt.date()
 
-        # Only count sessions that fall in the current ISO week
         if act_date < week_start:
             continue
 
@@ -110,22 +110,36 @@ def analyze_week(activities: list) -> dict:
             km_run += dist_km
             pace_str = _format_pace(act.get("avg_speed_mps"), act.get("distance_meters"), act.get("duration_seconds"))
             pace_part = f", avg pace {pace_str}" if pace_str else ""
-            week_labels.append(f"Run: {dist_km} km ({duration_min} min{pace_part})")
+            label = f"Run: {dist_km} km ({duration_min} min{pace_part})"
         elif act_type in _GYM_TYPES:
             gym_sessions += 1
-            week_labels.append(f"Gym — {name} ({duration_min} min)")
+            label = f"Gym — {name} ({duration_min} min)"
         else:
-            week_labels.append(f"{name} ({duration_min} min)")
+            label = f"{name} ({duration_min} min)"
+
+        daily_map.setdefault(act_date.isoformat(), []).append(label)
 
     hours_since = None
     if last_workout_dt is not None:
         hours_since = round((datetime.now() - last_workout_dt).total_seconds() / 3600, 1)
+
+    # Count consecutive training days ending on yesterday (today hasn't happened yet).
+    # Walk back up to 7 days so we don't stop artificially at a Monday boundary.
+    consecutive = 0
+    check = yesterday
+    while check >= week_start:
+        if check.isoformat() in daily_map:
+            consecutive += 1
+            check -= timedelta(days=1)
+        else:
+            break
 
     return {
         "total_sessions_this_week": total_sessions,
         "km_run_this_week": round(km_run, 1),
         "gym_sessions_this_week": gym_sessions,
         "hours_since_last_workout": hours_since,
-        "last_week_activities": week_labels,
+        "daily_activity_map": daily_map,
+        "consecutive_training_days": consecutive,
         "trained_yesterday": trained_yesterday,
     }

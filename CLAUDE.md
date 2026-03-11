@@ -23,13 +23,13 @@ and runs as a systemd service on Oracle Cloud Free Tier (Ubuntu 22.04).
 | `brain/memory.py` | Long-term fact extraction — `extract_memorable_facts` |
 | `brain/__init__.py` | Re-exports all public brain functions; **only module that imports `anthropic`** |
 | `storage.py` | **Only** module that touches DynamoDB / boto3 |
-| `briefing.py` | Morning briefing — build message, inline keyboard, cache workout, send |
+| `briefing.py` | Morning briefing — build message, inline keyboard, cache workout, send; gracefully skips recovery line for non-Garmin users |
 | `profile_wizard.py` | `/start` + `/profile` ConversationHandler wizard (9-field setup, includes height) |
 | `nutrition.py` | Macro formula (Mifflin-St Jeor), daily totals, message formatters, Claude prompt builders |
 | `nutrition_handlers.py` | Telegram routing — ingredient ConversationHandler + `nutr:` callback dispatcher |
-| `workout_recommender.py` | Build workout prompt from Garmin + profile, call `brain.get_workout_briefing` |
+| `workout_recommender.py` | Build workout prompt from Garmin + profile (or workout_history for non-Garmin), call `brain.get_workout_briefing` |
 | `garmin/daily_stats.py` | Fetch today's Garmin stats (sleep, HRV, steps, activities) |
-| `garmin/activity_analyzer.py` | Weekly activity analysis from Garmin data |
+| `garmin/activity_analyzer.py` | Rolling 7-day activity analysis from Garmin data |
 | `garmin/__init__.py` | Re-exports `fetch_daily_stats`, `initial_login`, `analyze_week` for clean imports |
 | `recovery.py` | Pure-rules recovery tier classification |
 | `proccess_explanation.md` | Developer ops guide (SSH, deploy, systemd) |
@@ -96,6 +96,8 @@ Local dev: `venv\Scripts\activate` then `python bot.py`
 **Destructive / complex actions** (clear history, profile update, Garmin reconnect) are **not tools** — Claude is instructed in `SYSTEM_PROMPT` to direct the user to the relevant slash command instead (`/clear`, `/profile`, `/connect_garmin`).
 
 **Cached workout key:** `workout_recommendation` (renamed from `full_recommendation` — all pipeline stages use this name consistently).
+
+**workout_history:** Rolling log of `{date, summary}` dicts stored in the user profile (max 14 entries = 7 days × 2 sessions). Written by `briefing.py` after every morning briefing via `storage.append_workout_history()`. Used by `workout_recommender.py` as the primary training context for non-Garmin users and as supplemental context for Garmin users.
 
 ---
 
