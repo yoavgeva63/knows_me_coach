@@ -54,15 +54,18 @@ COMMANDS_HELP = (
     WIZARD_HEIGHT,
     WIZARD_SEX,
     WIZARD_GOAL,
+    WIZARD_GOAL_RUNNING_DISTANCE,  # sub-state: asked when user picks "Running goal"
+    WIZARD_GOAL_CUSTOM,            # sub-state: asked when user picks "Custom"
     WIZARD_FITNESS_LEVEL,
-    WIZARD_WEEKLY_DAYS,
+    WIZARD_GYM_DAYS,
+    WIZARD_RUN_DAYS,
     WIZARD_SESSION_DURATION,
     WIZARD_DIETARY,
     WIZARD_GARMIN,
     WIZARD_GARMIN_EMAIL,
     WIZARD_GARMIN_PASSWORD,
     WIZARD_ALARM_TIME,
-) = range(14)
+) = range(17)
 
 # Ordered list of (profile_key, wizard_state) — defines both field order and
 # the mapping used by _advance() to skip already-filled fields.
@@ -74,7 +77,8 @@ _FIELD_STATES: list[tuple[str, int]] = [
     ("sex", WIZARD_SEX),
     ("primary_goal", WIZARD_GOAL),
     ("fitness_level", WIZARD_FITNESS_LEVEL),
-    ("weekly_training_days", WIZARD_WEEKLY_DAYS),
+    ("weekly_gym_days", WIZARD_GYM_DAYS),
+    ("weekly_run_days", WIZARD_RUN_DAYS),
     ("preferred_session_duration_minutes", WIZARD_SESSION_DURATION),
     ("dietary_restrictions", WIZARD_DIETARY),
     ("garmin_asked", WIZARD_GARMIN),
@@ -229,16 +233,50 @@ async def _ask_sex(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def _ask_goal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Prompt for primary goal via inline keyboard and return WIZARD_GOAL state."""
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Cut", callback_data="wiz:goal:Cut"),
-        InlineKeyboardButton("Maintain", callback_data="wiz:goal:Maintain"),
-        InlineKeyboardButton("Bulk", callback_data="wiz:goal:Bulk"),
-    ]])
+    """Prompt for primary goal via inline keyboard and return WIZARD_GOAL state.
+
+    Body-comp goals go straight to the next wizard step.
+    Running goal opens a sub-state to collect the target distance in km.
+    Custom opens a free-text sub-state.
+    """
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Cut", callback_data="wiz:goal:Cut"),
+            InlineKeyboardButton("Maintain", callback_data="wiz:goal:Maintain"),
+            InlineKeyboardButton("Bulk", callback_data="wiz:goal:Bulk"),
+        ],
+        [
+            InlineKeyboardButton("🏃 Running goal", callback_data="wiz:goal:_running"),
+            InlineKeyboardButton("Run + Gym", callback_data="wiz:goal:Run + Gym"),
+        ],
+        [
+            InlineKeyboardButton("General fitness", callback_data="wiz:goal:General fitness"),
+            InlineKeyboardButton("✏️ Custom", callback_data="wiz:goal:_custom"),
+        ],
+    ])
     await context.bot.send_message(
         update.effective_chat.id, "What's your primary goal?", reply_markup=kb
     )
     return WIZARD_GOAL
+
+
+async def _ask_goal_running_distance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Prompt for running target distance in km and return WIZARD_GOAL_RUNNING_DISTANCE state."""
+    await context.bot.send_message(
+        update.effective_chat.id,
+        "What's your target race distance in km? (e.g. 5, 10, 21, 42)\n"
+        "Just type the number.",
+    )
+    return WIZARD_GOAL_RUNNING_DISTANCE
+
+
+async def _ask_goal_custom(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Prompt for a free-text custom goal and return WIZARD_GOAL_CUSTOM state."""
+    await context.bot.send_message(
+        update.effective_chat.id,
+        "Describe your goal in your own words (e.g. 'Complete a triathlon' or 'Stay active and healthy').",
+    )
+    return WIZARD_GOAL_CUSTOM
 
 
 async def _ask_fitness_level(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -254,12 +292,30 @@ async def _ask_fitness_level(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return WIZARD_FITNESS_LEVEL
 
 
-async def _ask_weekly_days(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Prompt for weekly training days and return WIZARD_WEEKLY_DAYS state."""
+async def _ask_gym_days(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Prompt for weekly gym/strength sessions and return WIZARD_GYM_DAYS state."""
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(str(i), callback_data=f"wiz:gym_days:{i}") for i in range(6)
+    ]])
     await context.bot.send_message(
-        update.effective_chat.id, "How many days per week can you train? (1–7)"
+        update.effective_chat.id,
+        "How many gym / strength sessions per week? (tap 0 if you don't lift)",
+        reply_markup=kb,
     )
-    return WIZARD_WEEKLY_DAYS
+    return WIZARD_GYM_DAYS
+
+
+async def _ask_run_days(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Prompt for weekly run sessions and return WIZARD_RUN_DAYS state."""
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(str(i), callback_data=f"wiz:run_days:{i}") for i in range(6)
+    ]])
+    await context.bot.send_message(
+        update.effective_chat.id,
+        "How many runs per week? (tap 0 if you don't run)",
+        reply_markup=kb,
+    )
+    return WIZARD_RUN_DAYS
 
 
 async def _ask_session_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -336,8 +392,11 @@ _ASK_FNS: dict[int, any] = {
     WIZARD_HEIGHT: _ask_height,
     WIZARD_SEX: _ask_sex,
     WIZARD_GOAL: _ask_goal,
+    WIZARD_GOAL_RUNNING_DISTANCE: _ask_goal_running_distance,
+    WIZARD_GOAL_CUSTOM: _ask_goal_custom,
     WIZARD_FITNESS_LEVEL: _ask_fitness_level,
-    WIZARD_WEEKLY_DAYS: _ask_weekly_days,
+    WIZARD_GYM_DAYS: _ask_gym_days,
+    WIZARD_RUN_DAYS: _ask_run_days,
     WIZARD_SESSION_DURATION: _ask_session_duration,
     WIZARD_DIETARY: _ask_dietary,
     WIZARD_GARMIN: _ask_garmin,
@@ -399,14 +458,22 @@ async def wizard_sex_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return await _advance(update, context, after_field="sex")
 
 
-async def wizard_weekly_days(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Validate and collect weekly training days, then advance."""
-    text = update.message.text.strip()
-    if not text.isdigit() or not (1 <= int(text) <= 7):
-        await update.message.reply_text("Please enter a number between 1 and 7.")
-        return WIZARD_WEEKLY_DAYS
-    context.user_data["profile"]["weekly_training_days"] = int(text)
-    return await _advance(update, context, after_field="weekly_training_days")
+async def wizard_gym_days_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle gym days button selection and advance."""
+    query = update.callback_query
+    await query.answer()
+    days = int(query.data.split(":")[2])
+    context.user_data["profile"]["weekly_gym_days"] = days
+    return await _advance(update, context, after_field="weekly_gym_days")
+
+
+async def wizard_run_days_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle run days button selection and advance."""
+    query = update.callback_query
+    await query.answer()
+    days = int(query.data.split(":")[2])
+    context.user_data["profile"]["weekly_run_days"] = days
+    return await _advance(update, context, after_field="weekly_run_days")
 
 
 async def wizard_session_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -426,11 +493,45 @@ async def wizard_dietary_text(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def wizard_goal_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle goal selection button (Cut / Maintain / Bulk)."""
+    """Handle goal selection button.
+
+    Direct goals (Cut / Maintain / Bulk / Run + Gym / General fitness) are stored
+    immediately and advance the wizard. Special values '_running' and '_custom'
+    open follow-up sub-states to collect more detail before storing primary_goal.
+    """
     query = update.callback_query
     await query.answer()
-    goal = query.data.split(":")[2]  # "wiz:goal:Cut" → "Cut"
+    # callback_data format: "wiz:goal:<value>" — value may contain spaces/colons
+    goal = query.data[len("wiz:goal:"):]
+
+    if goal == "_running":
+        return await _ask_goal_running_distance(update, context)
+    if goal == "_custom":
+        return await _ask_goal_custom(update, context)
+
     context.user_data["profile"]["primary_goal"] = goal
+    return await _advance(update, context, after_field="primary_goal")
+
+
+async def wizard_goal_running_distance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Collect target race distance (km), build primary_goal string, and advance."""
+    text = update.message.text.strip().replace(",", ".").replace("km", "").strip()
+    try:
+        km = float(text)
+        if km <= 0 or km > 1000:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Please enter a valid distance in km (e.g. 5, 10, 21, 42).")
+        return WIZARD_GOAL_RUNNING_DISTANCE
+
+    context.user_data["profile"]["running_target_km"] = km
+    context.user_data["profile"]["primary_goal"] = f"{int(km) if km == int(km) else km}km race"
+    return await _advance(update, context, after_field="primary_goal")
+
+
+async def wizard_goal_custom(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Collect free-text custom goal and advance."""
+    context.user_data["profile"]["primary_goal"] = update.message.text.strip()
     return await _advance(update, context, after_field="primary_goal")
 
 
@@ -543,8 +644,15 @@ def build_wizard_handler() -> ConversationHandler:
             WIZARD_HEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, wizard_height)],
             WIZARD_SEX: [CallbackQueryHandler(wizard_sex_cb, pattern=r"^wiz:sex:")],
             WIZARD_GOAL: [CallbackQueryHandler(wizard_goal_cb, pattern=r"^wiz:goal:")],
+            WIZARD_GOAL_RUNNING_DISTANCE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, wizard_goal_running_distance)
+            ],
+            WIZARD_GOAL_CUSTOM: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, wizard_goal_custom)
+            ],
             WIZARD_FITNESS_LEVEL: [CallbackQueryHandler(wizard_fitness_cb, pattern=r"^wiz:fitness:")],
-            WIZARD_WEEKLY_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, wizard_weekly_days)],
+            WIZARD_GYM_DAYS: [CallbackQueryHandler(wizard_gym_days_cb, pattern=r"^wiz:gym_days:")],
+            WIZARD_RUN_DAYS: [CallbackQueryHandler(wizard_run_days_cb, pattern=r"^wiz:run_days:")],
             WIZARD_SESSION_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, wizard_session_duration)],
             WIZARD_DIETARY: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, wizard_dietary_text),

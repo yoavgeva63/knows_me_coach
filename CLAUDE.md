@@ -24,12 +24,12 @@ and runs as a systemd service on Oracle Cloud Free Tier (Ubuntu 22.04).
 | `brain/__init__.py` | Re-exports all public brain functions; **only module that imports `anthropic`** |
 | `storage.py` | **Only** module that touches DynamoDB / boto3 |
 | `briefing.py` | Morning briefing — build message, inline keyboard, cache workout, send; gracefully skips recovery line for non-Garmin users |
-| `profile_wizard.py` | `/start` + `/profile` ConversationHandler wizard (9-field setup, includes height) |
+| `profile_wizard.py` | `/start` + `/profile` ConversationHandler wizard — collects `weekly_gym_days`, `weekly_run_days`, expanded goal picker (body comp / running distance / custom) |
 | `nutrition.py` | Macro formula (Mifflin-St Jeor), daily totals, message formatters, Claude prompt builders |
 | `nutrition_handlers.py` | Telegram routing — ingredient ConversationHandler + `nutr:` callback dispatcher |
-| `workout_recommender.py` | Build workout prompt from Garmin + profile (or workout_history for non-Garmin), call `brain.get_workout_briefing` |
+| `workout_recommender.py` | Sport-aware workout prompt builder (gym / run / combined mode derived from `weekly_gym_days` + `weekly_run_days`); calls `brain.get_workout_briefing` |
 | `garmin/daily_stats.py` | Fetch today's Garmin stats (sleep, HRV, steps, activities) |
-| `garmin/activity_analyzer.py` | Rolling 7-day activity analysis from Garmin data |
+| `garmin/activity_analyzer.py` | Rolling 7-day activity analysis — tracks `run_sessions_this_week`, `long_run_km_this_week`, gym sessions |
 | `garmin/__init__.py` | Re-exports `fetch_daily_stats`, `initial_login`, `analyze_week` for clean imports |
 | `recovery.py` | Pure-rules recovery tier classification |
 | `proccess_explanation.md` | Developer ops guide (SSH, deploy, systemd) |

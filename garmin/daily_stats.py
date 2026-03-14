@@ -184,7 +184,7 @@ def _fetch_last_activity(client: Garmin) -> dict:
         return {"error": str(exc)}
 
 
-def _fetch_recent_activities(client: Garmin, limit: int = 7) -> list:
+def _fetch_recent_activities(client: Garmin, limit: int = 14) -> list:
     try:
         activities = client.get_activities(0, limit)
         result = []

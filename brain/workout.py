@@ -18,8 +18,9 @@ _WORKOUT_BRIEFING_TOOL = {
             "summary": {
                 "type": "string",
                 "description": (
-                    "One sentence: workout type and RPE, or 'Rest day — [brief reason]' "
-                    "if a rest day is recommended."
+                    "One sentence: workout type and effort level (e.g. 'Tempo run 8 km — hard effort', "
+                    "'Push day — heavy, ~60 min'), or 'Rest day — [brief reason]' if a rest day is recommended. "
+                    "No RPE numbers."
                 ),
             },
             "motivation": {

@@ -65,10 +65,12 @@ def analyze_week(activities: list) -> dict:
         {
             "total_sessions_this_week":  int,
             "km_run_this_week":          float,
+            "run_sessions_this_week":    int,   # number of distinct run sessions
+            "long_run_km_this_week":     float, # distance of the single longest run
             "gym_sessions_this_week":    int,
             "hours_since_last_workout":  float | None,
             "daily_activity_map":        dict[str, list[str]],  # "YYYY-MM-DD" → [label, ...]
-            "consecutive_training_days": int,   # days in a row ending today (or yesterday)
+            "consecutive_training_days": int,   # days in a row ending yesterday
             "trained_yesterday":         bool,
         }
     """
@@ -78,6 +80,8 @@ def analyze_week(activities: list) -> dict:
 
     total_sessions = 0
     km_run = 0.0
+    run_sessions = 0
+    long_run_km = 0.0
     gym_sessions = 0
     daily_map: dict[str, list[str]] = {}   # date ISO → list of session labels
     last_workout_dt: datetime | None = None
@@ -108,6 +112,9 @@ def analyze_week(activities: list) -> dict:
 
         if act_type in _RUN_TYPES or "run" in act_type:
             km_run += dist_km
+            run_sessions += 1
+            if dist_km > long_run_km:
+                long_run_km = dist_km
             pace_str = _format_pace(act.get("avg_speed_mps"), act.get("distance_meters"), act.get("duration_seconds"))
             pace_part = f", avg pace {pace_str}" if pace_str else ""
             label = f"Run: {dist_km} km ({duration_min} min{pace_part})"
@@ -137,6 +144,8 @@ def analyze_week(activities: list) -> dict:
     return {
         "total_sessions_this_week": total_sessions,
         "km_run_this_week": round(km_run, 1),
+        "run_sessions_this_week": run_sessions,
+        "long_run_km_this_week": round(long_run_km, 1),
         "gym_sessions_this_week": gym_sessions,
         "hours_since_last_workout": hours_since,
         "daily_activity_map": daily_map,

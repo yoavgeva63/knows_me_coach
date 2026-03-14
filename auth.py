@@ -1,21 +1,31 @@
 """
 Shared authorization helpers for the fitness coach bot.
 
-Parses ALLOWED_TELEGRAM_USER_IDS from the environment and exposes is_allowed().
-Format: "123456:Yoav_Geva,789012:John_Doe"  (underscore as space separator in names)
+Loads allowed users from allowed_users.json (committed, non-secret config).
+Falls back to ALLOWED_TELEGRAM_USER_IDS env var for backwards compatibility.
 """
+import json
 import logging
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()  # must run before _parse_allowed_users() reads os.environ
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+_ALLOWED_USERS_FILE = Path(__file__).parent / "allowed_users.json"
 
-def _parse_allowed_users() -> dict[int, str]:
-    """Parse ALLOWED_TELEGRAM_USER_IDS into {user_id: display_name}."""
+
+def _load_allowed_users() -> dict[int, str]:
+    """Load allowed users from allowed_users.json, falling back to env var."""
+    if _ALLOWED_USERS_FILE.exists():
+        with _ALLOWED_USERS_FILE.open() as f:
+            data: dict[str, str] = json.load(f)
+        return {int(uid): name for uid, name in data.items()}
+
+    # Legacy fallback: ALLOWED_TELEGRAM_USER_IDS="123:Yoav_Geva,456:John_Doe"
     raw = os.environ.get("ALLOWED_TELEGRAM_USER_IDS", "")
     result: dict[int, str] = {}
     for entry in raw.split(","):
@@ -33,7 +43,7 @@ def _parse_allowed_users() -> dict[int, str]:
 
 
 # Loaded once at import time.
-ALLOWED_USERS: dict[int, str] = _parse_allowed_users()
+ALLOWED_USERS: dict[int, str] = _load_allowed_users()
 
 
 def is_allowed(user_id: int) -> bool:

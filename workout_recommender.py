@@ -7,6 +7,11 @@ Flow:
   3. Build a structured prompt with interpreted context only (no raw HRV ms)
   4. Claude decides the specific workout and writes it in full detail
 
+Sport mode is derived from the user profile:
+  - gym-only:  weekly_gym_days > 0 and weekly_run_days == 0
+  - run-only:  weekly_run_days > 0 and weekly_gym_days == 0
+  - combined:  both > 0 (conflict-aware scheduling)
+
 Claude never sees raw HRV numbers — only the tier, its meaning, and constraints.
 """
 
@@ -38,6 +43,50 @@ _TIER_CONTEXT = {
         "Recommend active recovery only — light movement, mobility, walking."
     ),
 }
+
+
+def _sport_mode(user_profile: dict) -> str:
+    """Derive sport mode from profile training day split.
+
+    Returns 'gym', 'run', or 'combined'.
+    Falls back to 'gym' for legacy profiles that only have weekly_training_days.
+    """
+    gym = user_profile.get("weekly_gym_days", 0) or 0
+    run = user_profile.get("weekly_run_days", 0) or 0
+    if gym > 0 and run > 0:
+        return "combined"
+    if run > 0:
+        return "run"
+    return "gym"
+
+
+def _running_target_blurb(user_profile: dict) -> str:
+    """Return a coaching note about the user's running target distance, if set.
+
+    Only uses the explicit running_target_km field (set by the wizard's distance sub-state).
+    """
+    km = user_profile.get("running_target_km")
+    if not km:
+        return ""
+    km_val = float(km)
+    if km_val <= 5:
+        return "Race target ≤ 5 km — speed and VO2max are the priority. Include weekly intervals."
+    if km_val <= 10:
+        return "Race target 5–10 km — mix of speed work and tempo. One quality session per week."
+    if km_val <= 21:
+        return (
+            "Race target half marathon (≤ 21 km) — aerobic base + threshold tempo. "
+            "Weekly long run is essential; keep easy runs truly easy."
+        )
+    if km_val <= 42:
+        return (
+            "Race target marathon (≤ 42 km) — high aerobic volume, long runs up to ~32 km. "
+            "80% of runs should be easy/conversational pace."
+        )
+    return (
+        f"Race target ultra ({km_val} km) — volume and time-on-feet dominate. "
+        "Easy effort almost always; protect joints."
+    )
 
 
 def _event_blurb(target_event: dict) -> str:
@@ -178,13 +227,18 @@ def get_workout_recommendation(
         or user_profile.get("fitness_goal", "general fitness")
     )
     secondary_goal = user_profile.get("secondary_goal", "")
-    weekly_days = (
-        user_profile.get("weekly_training_days")
-        or user_profile.get("workouts_per_week", 4)
-    )
+    gym_days = user_profile.get("weekly_gym_days", 0) or 0
+    run_days = user_profile.get("weekly_run_days", 0) or 0
+    # Legacy fallback: profiles created before the gym/run split used weekly_training_days
+    if gym_days == 0 and run_days == 0:
+        legacy_days = user_profile.get("weekly_training_days") or user_profile.get("workouts_per_week", 4)
+        gym_days = int(legacy_days)
+    total_weekly_days = gym_days + run_days
     session_duration = user_profile.get("preferred_session_duration_minutes", 60)
     event_blurb = _event_blurb(user_profile.get("target_event", {}))
     coach_notes = user_profile.get("coach_notes", [])
+    mode = _sport_mode(user_profile)
+    running_target_note = _running_target_blurb(user_profile)
 
     coach_notes_block = ""
     if coach_notes:
@@ -195,12 +249,32 @@ def get_workout_recommendation(
     if previous_workout:
         previous_workout_block = f"\n## Yesterday's Workout Plan (written by you)\n{previous_workout}\n"
 
-    # ── 4. Build the training context block (differs by Garmin availability) ──
+    # ── 4. Build sport-specific context blocks ────────────────────────────────
+    if mode == "run":
+        training_days_line = f"Weekly runs: {run_days} | Gym: 0 | Preferred session: {session_duration} min"
+    elif mode == "combined":
+        training_days_line = (
+            f"Weekly gym sessions: {gym_days} | Weekly runs: {run_days} | "
+            f"Preferred session: {session_duration} min"
+        )
+    else:
+        training_days_line = f"Weekly gym sessions: {gym_days} | Preferred session: {session_duration} min"
+
+    # ── 5. Build the training history block (differs by Garmin availability) ──
     if has_garmin:
         hours_since = week_analysis["hours_since_last_workout"]
         hours_str = f"{hours_since:.0f} hours ago" if hours_since is not None else "unknown"
         consecutive = week_analysis["consecutive_training_days"]
         week_schedule = _build_week_schedule(week_analysis["daily_activity_map"])
+
+        run_stats = ""
+        if mode in ("run", "combined"):
+            long_run = week_analysis.get("long_run_km_this_week", 0.0)
+            run_sess = week_analysis.get("run_sessions_this_week", 0)
+            run_stats = (
+                f"\n- Run sessions: {run_sess} | Total km: {week_analysis['km_run_this_week']} km"
+                f" | Longest run: {long_run} km"
+            )
 
         training_context_block = f"""## Today's Recovery — {recovery["label"]}
 {_TIER_CONTEXT[tier]}
@@ -209,9 +283,8 @@ Intensity ceiling: {recovery["intensity_ceiling"]} (max RPE {recovery["max_rpe"]
 
 ## Training — Last 7 Days (rolling, from Garmin)
 {week_schedule}
-- Sessions: {week_analysis["total_sessions_this_week"]}
-- Km run: {week_analysis["km_run_this_week"]} km
-- Gym sessions: {week_analysis["gym_sessions_this_week"]}
+- Total sessions: {week_analysis["total_sessions_this_week"]}
+- Gym sessions: {week_analysis["gym_sessions_this_week"]}{run_stats}
 - Consecutive training days: {consecutive}
 - Last workout: {hours_str}"""
 
@@ -234,7 +307,41 @@ Base your rest/train decision purely on training load: consecutive days, session
         )
         workout_rec_closer = "Close with a brief coaching note on load or muscle group rationale."
 
-    # ── 5. Assemble the full prompt ───────────────────────────────────────────
+    # ── 6. Build sport-specific task instructions ─────────────────────────────
+    if mode == "gym":
+        sport_task = (
+            "This is a gym/strength athlete. "
+            "If training: write a detailed gym session (exact exercises, sets × reps). "
+            "Do NOT add effort cues per exercise. End the session with one coaching note "
+            "on overall effort level for today (e.g. 'Push hard — last rep of each set should be a grind' "
+            "or 'Keep it moderate — leave 2–3 reps in the tank throughout')."
+        )
+    elif mode == "run":
+        sport_task = (
+            "This is a running-focused athlete. "
+            "If training: write a run session with clear structure (warmup / main set / cooldown). "
+            "Use plain effort language — conversational, comfortable, comfortably hard, hard, all-out — "
+            "not RPE numbers. Vary session type across the week — "
+            "avoid scheduling the same type (e.g. long run) two days in a row. "
+            "Common types: easy run, tempo, intervals, long run, recovery jog."
+        )
+    else:  # combined
+        sport_task = (
+            "This athlete does both gym and running. "
+            f"Target {gym_days} gym session(s) and {run_days} run(s) per week. "
+            "Check the week schedule above: if the run quota is unmet and legs are fresh, schedule a run; "
+            "otherwise schedule a gym session. "
+            "Do NOT schedule a hard leg session the day before a planned run, "
+            "and avoid back-to-back long runs. "
+            "If training gym: exact exercises, sets × reps. Do NOT add effort cues per exercise — "
+            "end with one coaching note on overall effort for today. "
+            "If training run: structure with plain effort language (conversational / comfortably hard / hard / all-out), "
+            "vary type (easy / tempo / intervals / long)."
+        )
+
+    running_target_block = f"\n## Running Target\n{running_target_note}" if running_target_note else ""
+
+    # ── 7. Assemble the full prompt ───────────────────────────────────────────
     prompt = f"""You are a personal fitness coach writing a morning workout recommendation.
 
 ## Athlete
@@ -242,7 +349,7 @@ Base your rest/train decision purely on training load: consecutive days, session
 - Primary goal: {primary_goal}
 {f"- Secondary goal: {secondary_goal}" if secondary_goal else ""}\
 {f"- {event_blurb}" if event_blurb else ""}
-- Weekly training days: {weekly_days} | Preferred session: {session_duration} min{coach_notes_block}
+- {training_days_line}{coach_notes_block}{running_target_block}
 
 {training_context_block}
 {previous_workout_block}
@@ -250,34 +357,35 @@ Base your rest/train decision purely on training load: consecutive days, session
 {weather if weather else "N/A"}
 
 ## Your Task
+{sport_task}
+
 Decide whether {name} should train today, then write the morning briefing.
 
 **Rest day decision:** You may recommend a full rest day when the training load warrants it —
-for example, too many consecutive days relative to the target of {weekly_days} days/week with no break, or \
+for example, too many consecutive days relative to the target of {total_weekly_days} days/week with no break, or \
 {intensity_ceiling_note}
-Use the day-by-day schedule above and yesterday's workout to judge muscle group overlap and accumulated fatigue.
+Use the day-by-day schedule above and yesterday's workout to judge accumulated fatigue.
 A rest day is the right call when training today would be counterproductive.
 
 If training:
-- summary: one sentence — workout type and RPE (e.g. "Push day — RPE 7, heavy compound work (~60 min)")
+- summary: one sentence — workout type and effort level (e.g. "Tempo run 8 km — hard effort" or "Push day — heavy, ~60 min"). No RPE numbers.
 - workout_recommendation: start directly with the workout title and structure (no greeting, no recovery recap). \
 Full detailed session plan. {workout_rec_closer} Be specific:
   - Gym session → exact exercises, sets × reps per exercise
-  - Run → distance, structure (warmup / main set / cooldown), pace guidance via RPE
+  - Run → distance, structure (warmup / main set / cooldown), pace guidance via plain effort words (conversational / comfortably hard / hard / all-out)
   - Active recovery → exactly what to do and for how long
   Target ~{session_duration} min total. Under 230 words.
 
 If rest day:
-- summary: one sentence — "Rest day — [brief reason]" (e.g. "Rest day — 4 days in a row, let it consolidate.")
-- workout_recommendation: 2–3 sentences — what to do instead (sleep, walk, stretch) and why this rest \
-serves the goal. No workout plan.
+- summary: one sentence — "Rest day — [brief reason]"
+- workout_recommendation: 2–3 sentences — what to do instead and why this rest serves the goal.
 
 - motivation: one sentence tied to the athlete's goal — works for both training and rest days.
 
 Do not reference or react to any prior conversation in summary or motivation. Use prior context only in \
 workout_recommendation if directly relevant (e.g. user mentioned soreness)."""
 
-    # ── 6. Call Claude via brain.py (structured output) ──────────────────────
+    # ── 8. Call Claude via brain.py (structured output) ──────────────────────
     result = get_workout_briefing(prompt, conversation_history)
 
     return {**result, "recovery_tier": tier}
