@@ -12,7 +12,7 @@ from datetime import timedelta
 
 from dotenv import load_dotenv
 from garminconnect import GarminConnectAuthenticationError
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
