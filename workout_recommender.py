@@ -98,7 +98,7 @@ def _event_blurb(target_event: dict) -> str:
         return ""
     try:
         event_date = date.fromisoformat(date_str)
-        days_left = (event_date - date.today()).days
+        days_left = (event_date - israel_now().date()).days
     except ValueError:
         return f"Target event: {name}"
 
@@ -129,7 +129,7 @@ def _build_week_schedule(daily_map: dict[str, list[str]]) -> str:
 
     Shows the rolling 7 days ending yesterday. Today is omitted (that's what we're deciding).
     """
-    today = date.today()
+    today = israel_now().date()
     lines = []
     for offset in range(7, 0, -1):   # 7 days ago → yesterday
         day = today - timedelta(days=offset)

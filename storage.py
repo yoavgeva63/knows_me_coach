@@ -248,10 +248,13 @@ def save_daily_workout_and_history(user_id: str, workout: dict, date_str: str) -
     profile["daily_workout"] = {"date": date_str, **workout}
 
     history: list[dict] = profile.get("workout_history", [])
-    history.append({"date": date_str, "summary": workout["summary"]})
-    if len(history) > _MAX_WORKOUT_HISTORY:
-        history = history[-_MAX_WORKOUT_HISTORY:]
-    profile["workout_history"] = history
+    # Only append if no entry for this date already exists — prevents duplicates when
+    # the briefing is triggered multiple times on the same day (auto + manual).
+    if not any(e.get("date") == date_str for e in history):
+        history.append({"date": date_str, "summary": workout["summary"]})
+        if len(history) > _MAX_WORKOUT_HISTORY:
+            history = history[-_MAX_WORKOUT_HISTORY:]
+        profile["workout_history"] = history
 
     save_profile(user_id, profile)
 
@@ -444,7 +447,14 @@ def append_workout_history(user_id: str, entries: list[dict]) -> None:
     """
     profile = load_profile(user_id)
     history: list[dict] = profile.get("workout_history", [])
-    history.extend(entries)
+    # Block exact duplicates (same date + same summary) but allow two-a-day entries
+    # where the same date has a different session (e.g. morning gym + evening run).
+    existing_keys = {(e.get("date"), e.get("summary")) for e in history}
+    for entry in entries:
+        key = (entry.get("date"), entry.get("summary"))
+        if key not in existing_keys:
+            history.append(entry)
+            existing_keys.add(key)
     if len(history) > _MAX_WORKOUT_HISTORY:
         history = history[-_MAX_WORKOUT_HISTORY:]
     profile["workout_history"] = history
