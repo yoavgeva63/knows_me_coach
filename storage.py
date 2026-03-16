@@ -451,6 +451,59 @@ def append_workout_history(user_id: str, entries: list[dict]) -> None:
     save_profile(user_id, profile)
 
 
+def update_workout_status(
+    user_id: str,
+    date_str: str,
+    status: str,
+    actual_summary: str | None = None,
+    actual_type: str | None = None,
+) -> bool:
+    """Update the completion status of a workout_history entry for a given date.
+
+    If the entry already has a status it is overwritten (re-logging is allowed).
+
+    Args:
+        date_str:       Date of the workout as YYYY-MM-DD.
+        status:         "done", "modified", or "skipped".
+        actual_summary: What the user actually did — required when status is "modified".
+        actual_type:    "same_modified" or "different" — required when status is "modified".
+
+    Returns:
+        True if an entry was found and updated, False if no entry exists for date_str.
+    """
+    profile = load_profile(user_id)
+    history: list[dict] = profile.get("workout_history", [])
+    for entry in history:
+        if entry.get("date") == date_str:
+            entry["status"] = status
+            if actual_summary is not None:
+                entry["actual_summary"] = actual_summary
+            if actual_type is not None:
+                entry["actual_type"] = actual_type
+            profile["workout_history"] = history
+            save_profile(user_id, profile)
+            return True
+    logger.warning("update_workout_status: no workout_history entry found for %s on %s", user_id, date_str)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Weekly summary tracking
+# ---------------------------------------------------------------------------
+
+def get_weekly_sent_saturday(user_id: str) -> str | None:
+    """Return the Saturday date string (YYYY-MM-DD) of the last sent weekly summary, or None."""
+    profile = load_profile(user_id)
+    return profile.get("weekly_sent_saturday")
+
+
+def mark_weekly_sent(user_id: str, saturday_str: str) -> None:
+    """Record that the weekly summary was sent for the week ending on saturday_str."""
+    profile = load_profile(user_id)
+    profile["weekly_sent_saturday"] = saturday_str
+    save_profile(user_id, profile)
+
+
 # ---------------------------------------------------------------------------
 # User enumeration
 # ---------------------------------------------------------------------------
@@ -503,7 +556,7 @@ def load_daily_workout(user_id: str, date_str: str) -> dict | None:
     """Return today's cached workout, or None if not generated yet or from a previous day.
 
     Always reads directly from DynamoDB (bypassing the in-memory profile cache) because
-    the workout may have been written by a separate process (e.g. morning_check.py cron).
+    the workout may have been written by a separate process (e.g. trigger_briefings.py cron).
 
     Args:
         date_str: Today's date as YYYY-MM-DD.

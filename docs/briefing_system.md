@@ -3,7 +3,7 @@
 ## Overview
 
 The morning briefing is the bot's main daily touch-point. It is sent automatically
-via cron (`morning_check.py`) or manually via `/morning`. It pre-generates the full
+via cron (`trigger_briefings.py`) or manually via `/morning`. It pre-generates the full
 workout plan and caches it so button taps respond instantly.
 
 Garmin is optional. Users without a connected Garmin account get the same briefing

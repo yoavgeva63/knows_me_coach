@@ -1,11 +1,13 @@
 """
-Morning alarm checker — run every 15 minutes via cron on the Ubuntu server.
+Scheduled briefing trigger — run every 15 minutes via cron on the Ubuntu server.
 
-Iterates all users in DynamoDB and sends each one their morning briefing when
-their configured alarm time is reached (or when Garmin detects a wake-up).
+Iterates all users in DynamoDB and:
+  - Sends the morning briefing when the configured alarm time is reached
+    (or when Garmin detects a wake-up).
+  - Sends the weekly summary every Saturday at 19:00 Israel time.
 
 Cron entry (edit with: crontab -e):
-    */15 * * * * cd /home/ubuntu/knows_me_coach && /home/ubuntu/knows_me_coach/venv/bin/python morning_check.py >> /home/ubuntu/knows_me_coach/morning_check.log 2>&1
+    */15 * * * * cd /home/ubuntu/knows_me_coach && /home/ubuntu/knows_me_coach/venv/bin/python trigger_briefings.py >> /home/ubuntu/knows_me_coach/trigger_briefings.log 2>&1
 
 Alarm fires at the first 15-minute boundary >= the configured time.
 Example: alarm set to 09:00 → fires at 09:00. Set to 09:07 → fires at 09:15.
@@ -13,7 +15,7 @@ Example: alarm set to 09:00 → fires at 09:00. Set to 09:07 → fires at 09:15.
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
@@ -24,6 +26,8 @@ from telegram import Bot
 import garmin
 import storage
 from briefing import send_morning_briefing
+from utils import israel_now, TZ_ISRAEL
+from weekly_briefing import send_weekly_briefing
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
@@ -31,7 +35,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_ISRAEL_UTC_OFFSET_H = 2
 _SLEEP_MODE_FALLBACK = "09:30"
 
 
@@ -63,7 +66,7 @@ async def _check_and_send(
             has_early_wake = False  # woke before 05:00 — likely a bathroom trip, not morning
             if wake_utc_str:
                 wake_utc = datetime.fromisoformat(wake_utc_str)
-                wake_israel = wake_utc + timedelta(hours=_ISRAEL_UTC_OFFSET_H)
+                wake_israel = wake_utc.astimezone(TZ_ISRAEL)
                 if wake_israel.strftime("%Y-%m-%d") == today_israel and now_utc >= wake_utc:
                     if wake_israel.hour >= 5:
                         logger.info(
@@ -110,8 +113,26 @@ async def _check_and_send(
         await send_morning_briefing(bot, int(user_id_str), user_id_str)
 
 
+_WEEKLY_SEND_TIME = "19:00"
+
+
+async def _check_and_send_weekly(
+    bot: Bot,
+    user_id_str: str,
+    saturday_str: str,
+    now_hhmm: str,
+) -> None:
+    """Send the weekly summary for one user if due and not already sent this week."""
+    if now_hhmm < _WEEKLY_SEND_TIME:
+        return
+    if storage.get_weekly_sent_saturday(user_id_str) == saturday_str:
+        logger.info("Weekly summary already sent for week ending %s, user %s.", saturday_str, user_id_str)
+        return
+    await send_weekly_briefing(bot, int(user_id_str), user_id_str)
+
+
 async def main() -> None:
-    """Check all users and send morning briefings where conditions are met."""
+    """Check all users and send morning briefings (and weekly summaries on Saturdays)."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         logger.error("TELEGRAM_BOT_TOKEN must be set in .env")
@@ -123,9 +144,10 @@ async def main() -> None:
         return
 
     now_utc = datetime.now(timezone.utc)
-    now_israel = now_utc + timedelta(hours=_ISRAEL_UTC_OFFSET_H)
+    now_israel = israel_now()
     today_israel = now_israel.strftime("%Y-%m-%d")
     now_hhmm = now_israel.strftime("%H:%M")
+    is_saturday = now_israel.weekday() == 5  # Monday=0 … Saturday=5
 
     bot = Bot(token=token)
     for user_id_str in all_user_ids:
@@ -133,6 +155,12 @@ async def main() -> None:
             await _check_and_send(bot, user_id_str, now_utc, today_israel, now_hhmm)
         except Exception as exc:
             logger.error("Unexpected error for user %s: %s", user_id_str, exc)
+
+        if is_saturday:
+            try:
+                await _check_and_send_weekly(bot, user_id_str, today_israel, now_hhmm)
+            except Exception as exc:
+                logger.error("Weekly summary error for user %s: %s", user_id_str, exc)
 
 
 if __name__ == "__main__":

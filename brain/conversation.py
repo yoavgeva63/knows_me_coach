@@ -119,6 +119,45 @@ ACTION_TOOLS = [
             "required": ["workout_recommendation"],
         },
     },
+    {
+        "name": "trigger_weekly_briefing",
+        "description": (
+            "Generate and send the weekly summary to the user. "
+            "Use only when the user explicitly asks for their weekly summary or weekly review."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "log_workout_status",
+        "description": (
+            "Log the user's actual workout outcome for TODAY only. "
+            "Call when the user reports in conversation that they completed, modified, or skipped today's workout. "
+            "Do NOT call this for past days — if the user mentions a workout from a previous day, "
+            "acknowledge it in your reply but do not call this tool. "
+            "For 'modified': set actual_summary to what they actually did or plan to do, "
+            "and actual_type to 'same_modified' (tweaked the plan) or 'different' (completely different session)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["done", "modified", "skipped"],
+                    "description": "The workout outcome.",
+                },
+                "actual_summary": {
+                    "type": "string",
+                    "description": "Concise one-liner of what they actually did. Required when status is 'modified'.",
+                },
+                "actual_type": {
+                    "type": "string",
+                    "enum": ["same_modified", "different"],
+                    "description": "Required when status is 'modified'.",
+                },
+            },
+            "required": ["status"],
+        },
+    },
 ]
 
 

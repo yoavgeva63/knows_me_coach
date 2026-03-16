@@ -1,13 +1,11 @@
 """
 Shared morning briefing logic.
-Used by bot.py (/morning command), morning_check.py (cron), and lambda_handler.py.
+Used by bot.py (/morning command), trigger_briefings.py (cron), and lambda_handler.py.
 """
 import logging
 import re
 import time
-from datetime import datetime, timezone
-
-from datetime import date, timedelta
+from datetime import timedelta
 
 import requests
 from garminconnect import GarminConnectAuthenticationError
@@ -15,6 +13,7 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 import garmin
 import storage
+from utils import israel_now
 from workout_recommender import get_workout_recommendation
 
 logger = logging.getLogger(__name__)
@@ -138,8 +137,9 @@ async def send_morning_briefing(
 
     Marks today as sent in storage on success.
     """
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    now_israel = israel_now()
+    today = now_israel.strftime("%Y-%m-%d")
+    yesterday = (now_israel - timedelta(days=1)).strftime("%Y-%m-%d")
     weather = fetch_weather()
     profile = storage.load_profile(user_id_str)
     history = storage.load_history(user_id_str)

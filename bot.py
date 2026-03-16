@@ -8,7 +8,7 @@ import asyncio
 import logging
 import os
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import timedelta
 
 from dotenv import load_dotenv
 from garminconnect import GarminConnectAuthenticationError
@@ -26,7 +26,8 @@ from telegram.ext import (
 import garmin
 import storage
 from auth import is_allowed
-from brain import get_claude_response, extract_memorable_facts
+from utils import israel_now, israel_today
+from brain import get_claude_response, extract_memorable_facts, interpret_workout_modification
 from briefing import fetch_weather, md_to_html, send_morning_briefing
 from nutrition_handlers import (
     build_nutrition_ingredient_handler,
@@ -37,6 +38,7 @@ from profile_wizard import build_wizard_handler
 from workout_recommender import get_workout_recommendation
 
 load_dotenv()
+
 
 # Keywords that signal a nutrition-related message. When matched, today's logged
 # meals are fetched from the already-loaded profile and passed to the coach.
@@ -131,6 +133,114 @@ def _build_garmin_connect_handler() -> ConversationHandler:
 
 
 # ---------------------------------------------------------------------------
+# Workout completion ConversationHandler
+# ---------------------------------------------------------------------------
+
+_MODIFY_DETAILS = 0  # single state: waiting for the user's modification description
+
+def _workout_log_keyboard(date_str: str) -> InlineKeyboardMarkup:
+    """Return the Done / Modify / Skip keyboard with the workout date baked into callback_data.
+
+    Embedding the date means tapping a button days later always logs for the
+    correct workout date, not for whatever day the button happens to be tapped.
+    """
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Done",   callback_data=f"workout:done:{date_str}"),
+        InlineKeyboardButton("✏️ Modify", callback_data=f"workout:modify:{date_str}"),
+        InlineKeyboardButton("❌ Skip",   callback_data=f"workout:skip:{date_str}"),
+    ]])
+
+
+async def _workout_log_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle Done / Modify / Skip button taps from the workout detail message.
+
+    Done and Skip are resolved immediately (END). Modify asks a follow-up question
+    and transitions to _MODIFY_DETAILS state.
+    """
+    query = update.callback_query
+    user_id = str(query.from_user.id)
+    await query.answer()
+
+    _, action, date_str = query.data.split(":")  # "workout", "done|modify|skip", "YYYY-MM-DD"
+
+    if action == "done":
+        if storage.update_workout_status(user_id, date_str, "done"):
+            await query.message.reply_text("✅ Logged! Nice work today.")
+        else:
+            await query.message.reply_text("Couldn't find that workout entry — it may have already been rotated out.")
+        return ConversationHandler.END
+
+    if action == "skip":
+        if storage.update_workout_status(user_id, date_str, "skipped"):
+            await query.message.reply_text("Got it — logged as skipped.")
+        else:
+            await query.message.reply_text("Couldn't find that workout entry — it may have already been rotated out.")
+        return ConversationHandler.END
+
+    # action == "modify"
+    context.user_data["workout_log_date"] = date_str
+    # Store the original summary so interpret_workout_modification has context.
+    cached = storage.load_daily_workout(user_id, date_str)
+    context.user_data["workout_log_original"] = cached.get("summary", "") if cached else ""
+    await query.message.reply_text(
+        "What's your plan? Tell me what you'll change or what you'll do instead."
+    )
+    return _MODIFY_DETAILS
+
+
+async def _workout_log_modify_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receive the user's modification description, interpret it, and persist."""
+    user_id = str(update.effective_user.id)
+    user_plan = update.message.text.strip()
+    date_str = context.user_data.pop(
+        "workout_log_date",
+        israel_today(),
+    )
+    original_summary = context.user_data.pop("workout_log_original", "")
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: interpret_workout_modification(original_summary, user_plan),
+        )
+        logged = storage.update_workout_status(
+            user_id, date_str, "modified",
+            actual_summary=result["actual_summary"],
+            actual_type=result["actual_type"],
+        )
+        if logged:
+            await update.message.reply_text(f"Got it — logged as: {result['actual_summary']}")
+        else:
+            await update.message.reply_text("Couldn't find that workout entry — it may have already been rotated out.")
+    except Exception as exc:
+        logger.error("interpret_workout_modification failed for %s: %s", user_id, exc)
+        await update.message.reply_text("Had trouble logging that — try again in a moment.")
+
+    return ConversationHandler.END
+
+
+async def _workout_log_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancel the modify flow."""
+    context.user_data.pop("workout_log_date", None)
+    context.user_data.pop("workout_log_original", None)
+    await update.message.reply_text("Cancelled.")
+    return ConversationHandler.END
+
+
+def _build_workout_log_handler() -> ConversationHandler:
+    """Return the ConversationHandler for workout completion logging."""
+    return ConversationHandler(
+        entry_points=[CallbackQueryHandler(_workout_log_entry, pattern=r"^workout:(done|modify|skip):\d{4}-\d{2}-\d{2}$")],
+        states={
+            _MODIFY_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, _workout_log_modify_details)],
+        },
+        fallbacks=[CommandHandler("cancel", _workout_log_cancel)],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Command handlers
 # ---------------------------------------------------------------------------
 
@@ -193,6 +303,18 @@ async def morning(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_morning_briefing(context.bot, update.effective_chat.id, str(user_id))
 
 
+async def weekly(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /weekly command — send the weekly summary for the current Sun–Sat week."""
+    user_id = update.effective_user.id
+    if not is_allowed(user_id):
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    # Import here to avoid circular imports at module level.
+    from weekly_briefing import send_weekly_briefing
+    await send_weekly_briefing(context.bot, update.effective_chat.id, str(user_id))
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle all incoming text messages."""
     user_id = update.effective_user.id
@@ -203,7 +325,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_text = update.message.text
     logger.info("Message from %s: %s", user_id, user_text[:80])
 
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_str = israel_today()
     profile, daily_workout = storage.load_user_data(str(user_id), today_str)
     if not profile:
         await update.message.reply_text("Welcome! Please run /start to set up your profile first.")
@@ -227,7 +349,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logged_meals = storage.get_meals_from_profile(profile, today_str)
 
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         reply, tool_calls = await loop.run_in_executor(
             None,
             lambda: get_claude_response(
@@ -257,6 +379,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await send_morning_briefing(context.bot, update.effective_chat.id, str(user_id))
                 briefing_triggered = True
                 logger.info("Tool: trigger_morning_briefing for user %s", user_id)
+            elif name == "trigger_weekly_briefing":
+                from weekly_briefing import send_weekly_briefing
+                await send_weekly_briefing(context.bot, update.effective_chat.id, str(user_id))
+                briefing_triggered = True
+                logger.info("Tool: trigger_weekly_briefing for user %s", user_id)
+            elif name == "log_workout_status":
+                today_str_tool = israel_today()
+                logged = storage.update_workout_status(
+                    str(user_id),
+                    today_str_tool,
+                    inp["status"],
+                    actual_summary=inp.get("actual_summary"),
+                    actual_type=inp.get("actual_type"),
+                )
+                if logged:
+                    logger.info("Tool: log_workout_status(%s) for user %s", inp["status"], user_id)
+                else:
+                    logger.warning("Tool: log_workout_status found no entry for %s on %s", user_id, today_str_tool)
             elif name == "update_daily_workout":
                 if not storage.load_daily_workout(str(user_id), today_str):
                     base = get_workout_recommendation(
@@ -280,7 +420,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     history.append({"role": "assistant", "content": reply, "ts": today_str})
 
     # Drop messages older than 7 days (with fact extraction on what's dropped).
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+    cutoff = (israel_now() - timedelta(days=7)).strftime("%Y-%m-%d")
     stale = [m for m in history if m.get("ts", today_str) < cutoff]
     if stale:
         history = [m for m in history if m.get("ts", today_str) >= cutoff]
@@ -323,14 +463,18 @@ async def handle_briefing_action(update: Update, _context: ContextTypes.DEFAULT_
     action = query.data.split(":")[1] if ":" in query.data else query.data
 
     if action == "workout":
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = israel_today()
         cached = storage.load_daily_workout(str(user_id), today)
         if cached:
             full_text = cached["workout_recommendation"]
         else:
             await query.message.reply_text("No workout cached for today — send /morning to generate one.")
             return
-        await query.message.reply_text(md_to_html(full_text), parse_mode="HTML")
+        await query.message.reply_text(
+            md_to_html(full_text),
+            parse_mode="HTML",
+            reply_markup=_workout_log_keyboard(today),
+        )
 
     elif action == "nutrition":
         await handle_nutrition_briefing_tap(query, str(query.from_user.id))
@@ -356,9 +500,11 @@ def main() -> None:
     app.add_handler(build_wizard_handler())
     app.add_handler(_build_garmin_connect_handler())
     app.add_handler(build_nutrition_ingredient_handler())
+    app.add_handler(_build_workout_log_handler())
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("remember", remember))
     app.add_handler(CommandHandler("morning", morning))
+    app.add_handler(CommandHandler("weekly", weekly))
     app.add_handler(CommandHandler("settime", settime))
     app.add_handler(CallbackQueryHandler(handle_briefing_action, pattern=r"^action:"))
     app.add_handler(CallbackQueryHandler(handle_nutrition_callback, pattern=r"^nutr:"))

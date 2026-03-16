@@ -30,17 +30,17 @@ Starting the bot:
 When wanting to run Python commands directly:
     source venv/bin/activate
 
-**Morning briefing cron (runs every 15 min):**
+**Briefing cron (runs every 15 min — handles morning briefings and Saturday weekly summary):**
 View current crontab:
     crontab -l
 
 To install (first time setup):
     crontab -e
     # Add this line:
-    */15 * * * * cd /home/ubuntu/knows_me_coach && /home/ubuntu/knows_me_coach/venv/bin/python morning_check.py >> /home/ubuntu/knows_me_coach/morning_check.log 2>&1
+    */15 * * * * cd /home/ubuntu/knows_me_coach && /home/ubuntu/knows_me_coach/venv/bin/python trigger_briefings.py >> /home/ubuntu/knows_me_coach/trigger_briefings.log 2>&1
 
-Check morning_check logs:
-    tail -50 /home/ubuntu/knows_me_coach/morning_check.log
+Check trigger_briefings logs:
+    tail -50 /home/ubuntu/knows_me_coach/trigger_briefings.log
 
 Trigger briefing manually:
-    cd /home/ubuntu/knows_me_coach && source venv/bin/activate && python morning_check.py
+    cd /home/ubuntu/knows_me_coach && source venv/bin/activate && python trigger_briefings.py

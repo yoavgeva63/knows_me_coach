@@ -25,11 +25,13 @@ from telegram.ext import (
 
 import storage
 from auth import is_allowed
+from utils import israel_today
 from brain import get_ingredient_meal, get_meal_suggestions
 from briefing import md_to_html
 import nutrition
 
 logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Ingredient collection ConversationHandler — states
@@ -107,7 +109,7 @@ async def _nutr_receive_ingredients(update: Update, context: ContextTypes.DEFAUL
     storage.save_groceries(user_id, ingredients)
 
     profile = storage.load_profile(user_id)
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_str = israel_today()
     logged_meals = storage.load_daily_meals(user_id, today_str)
     targets = nutrition.calculate_macros(profile)
     remaining = nutrition.compute_remaining(targets, logged_meals)
@@ -211,7 +213,7 @@ async def handle_nutrition_callback(update: Update, context: ContextTypes.DEFAUL
     await query.answer()
     parts = query.data.split(":")  # e.g. ["nutr", "meal", "breakfast"]
     action = parts[1]
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_str = israel_today()
 
     profile = storage.load_profile(user_id)
     logged_meals = storage.load_daily_meals(user_id, today_str)
@@ -296,7 +298,7 @@ async def handle_nutrition_briefing_tap(query, user_id: str) -> None:
     Called from bot.py's handle_briefing_action when action == "nutrition".
     Shows the macro dashboard for today.
     """
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_str = israel_today()
     profile = storage.load_profile(user_id)
     logged_meals = storage.load_daily_meals(user_id, today_str)
     targets = nutrition.calculate_macros(profile)

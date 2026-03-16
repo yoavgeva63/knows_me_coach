@@ -8,6 +8,7 @@ and persist the tokens. Subsequent calls use the stored tokens.
 Public API:
   - initial_login(user_id, email, password)  — first-time auth, saves tokens
   - fetch_daily_stats(user_id, force_refresh) — today's health snapshot
+  - fetch_week_stats(user_id, sunday, saturday) — aggregated Sun–Sat recovery summary
 """
 
 import logging
@@ -269,3 +270,128 @@ def _fetch_new_daily_stats(user_id: str) -> dict:
     # Persist tokens in case garth silently refreshed them during the requests.
     _refresh_tokens(user_id, client)
     return result
+
+
+def _fetch_daily_sleep_summary(client: Garmin, day: str) -> dict:
+    """Fetch just the sleep score and duration for a given date.
+
+    Lighter wrapper around _fetch_sleep — returns only the two fields needed
+    for weekly aggregation (score + total seconds).
+    """
+    try:
+        data = client.get_sleep_data(day)
+        daily = data.get("dailySleepDTO", {})
+        return {
+            "sleep_score": daily.get("sleepScores", {}).get("overall", {}).get("value"),
+            "total_sleep_seconds": daily.get("sleepTimeSeconds"),
+        }
+    except Exception as exc:
+        logger.debug("Sleep fetch failed for %s on %s: %s", client.display_name, day, exc)
+        return {}
+
+
+def _fetch_daily_steps_total(client: Garmin, day: str) -> int | None:
+    """Fetch total step count for a given date via the user summary endpoint.
+
+    Uses get_user_summary (one lightweight call) rather than the full step-bucket
+    endpoint used for wake detection — we only need the daily total here.
+    """
+    try:
+        summary = client.get_user_summary(day)
+        return summary.get("totalSteps")
+    except Exception as exc:
+        logger.debug("Steps fetch failed for %s on %s: %s", day, client.display_name, exc)
+        return None
+
+
+def fetch_week_stats(user_id: str, sunday: date, saturday: date) -> dict:
+    """Return an aggregated health summary for the Sun–Sat week.
+
+    Makes ~15 API calls total:
+      - 7 lightweight sleep calls (one per day)
+      - 7 lightweight steps calls (one per day via user summary)
+      - 1 HRV call on Saturday (weeklyAvg is already a Garmin-computed 7-day average)
+
+    Each sub-call catches its own errors, so a single failing endpoint never
+    breaks the whole summary. Returns {} if the user has no Garmin tokens.
+
+    Args:
+        user_id:  Telegram user ID string.
+        sunday:   First day of the week (date object).
+        saturday: Last day of the week (date object).
+
+    Returns:
+        {
+            "avg_sleep_score":      int | None,
+            "avg_sleep_duration_min": int | None,
+            "hrv_trend":            str | None,   e.g. "stable around baseline"
+            "total_steps":          int | None,
+            "days_with_sleep_data": int,
+        }
+    """
+    try:
+        client = get_garmin_client(user_id)
+    except Exception:
+        return {}
+
+    today = date.today()
+    week_days = [
+        (sunday + timedelta(days=i)).isoformat()
+        for i in range(7)
+        if sunday + timedelta(days=i) <= today
+    ]
+
+    # --- Sleep: 7 calls ---
+    sleep_scores = []
+    sleep_durations_sec = []
+    for day in week_days:
+        s = _fetch_daily_sleep_summary(client, day)
+        if s.get("sleep_score") is not None:
+            sleep_scores.append(s["sleep_score"])
+        if s.get("total_sleep_seconds") is not None:
+            sleep_durations_sec.append(s["total_sleep_seconds"])
+
+    avg_sleep_score = round(sum(sleep_scores) / len(sleep_scores)) if sleep_scores else None
+    avg_sleep_duration_min = (
+        round(sum(sleep_durations_sec) / len(sleep_durations_sec) / 60)
+        if sleep_durations_sec else None
+    )
+
+    # --- Steps: 7 calls ---
+    total_steps = 0
+    steps_found = False
+    for day in week_days:
+        steps = _fetch_daily_steps_total(client, day)
+        if steps is not None:
+            total_steps += steps
+            steps_found = True
+
+    # --- HRV: 1 call on the latest available day (Saturday when the week is complete,
+    #          otherwise today — never request a future date). ---
+    hrv_trend: str | None = None
+    try:
+        hrv_day = min(saturday, date.today())
+        hrv_data = client.get_hrv_data(hrv_day.isoformat())
+        summary = hrv_data.get("hrvSummary", {})
+        last_night = summary.get("lastNight")
+        weekly_avg = summary.get("weeklyAvg")
+        if last_night is not None and weekly_avg is not None and weekly_avg > 0:
+            ratio = last_night / weekly_avg
+            if ratio >= 1.05:
+                hrv_trend = "above baseline — good recovery"
+            elif ratio <= 0.95:
+                hrv_trend = "below baseline — take it easy"
+            else:
+                hrv_trend = "stable around baseline"
+    except Exception as exc:
+        logger.debug("HRV fetch failed for week ending %s: %s", saturday, exc)
+
+    _refresh_tokens(user_id, client)
+
+    return {
+        "avg_sleep_score": avg_sleep_score,
+        "avg_sleep_duration_min": avg_sleep_duration_min,
+        "hrv_trend": hrv_trend,
+        "total_steps": total_steps if steps_found else None,
+        "days_with_sleep_data": len(sleep_scores),
+    }

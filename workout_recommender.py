@@ -18,6 +18,7 @@ Claude never sees raw HRV numbers — only the tier, its meaning, and constraint
 from datetime import date, timedelta
 
 from brain import get_workout_briefing
+from utils import israel_now
 from recovery import classify_recovery
 from garmin import analyze_week
 
@@ -147,7 +148,7 @@ def _build_history_schedule(workout_history: list[dict]) -> str:
     Used for non-Garmin users. Multiple entries on the same date (double sessions)
     are shown on the same line separated by ' | '.
     """
-    today = date.today()
+    today = israel_now().date()
     by_date: dict[str, list[str]] = {}
     for entry in workout_history:
         d = entry.get("date", "")
