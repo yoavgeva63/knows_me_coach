@@ -18,7 +18,7 @@ All public symbols are re-exported here so callers can simply do:
 from brain.conversation import ACTION_TOOLS, SYSTEM_PROMPT, get_claude_response
 from brain.memory import extract_memorable_facts
 from brain.nutrition import get_ingredient_meal, get_meal_suggestions
-from brain.workout import get_workout_briefing
+from brain.workout import get_modified_workout, get_workout_briefing
 from brain.workout_log import interpret_workout_modification
 from brain.weekly_summary import get_weekly_coaches_take
 
@@ -27,6 +27,7 @@ __all__ = [
     "ACTION_TOOLS",
     "get_claude_response",
     "get_workout_briefing",
+    "get_modified_workout",
     "get_meal_suggestions",
     "get_ingredient_meal",
     "extract_memorable_facts",

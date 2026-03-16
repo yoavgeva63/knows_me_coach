@@ -27,7 +27,7 @@ import garmin
 import storage
 from auth import is_allowed
 from utils import israel_now, israel_today
-from brain import get_claude_response, extract_memorable_facts, interpret_workout_modification
+from brain import get_claude_response, extract_memorable_facts, get_modified_workout, interpret_workout_modification
 from briefing import fetch_weather, md_to_html, send_morning_briefing
 from nutrition_handlers import (
     build_nutrition_ingredient_handler,
@@ -189,34 +189,34 @@ async def _workout_log_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def _workout_log_modify_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Receive the user's modification description, interpret it, and persist."""
+    """Receive the user's modification request, generate a new workout, and send it with action buttons."""
     user_id = str(update.effective_user.id)
-    user_plan = update.message.text.strip()
-    date_str = context.user_data.pop(
-        "workout_log_date",
-        israel_today(),
-    )
-    original_summary = context.user_data.pop("workout_log_original", "")
+    user_request = update.message.text.strip()
+    date_str = context.user_data.pop("workout_log_date", israel_today())
+    original_workout = context.user_data.pop("workout_log_original", "")
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None,
-            lambda: interpret_workout_modification(original_summary, user_plan),
+            lambda: get_modified_workout(original_workout, user_request),
         )
-        logged = storage.update_workout_status(
-            user_id, date_str, "modified",
-            actual_summary=result["actual_summary"],
-            actual_type=result["actual_type"],
+        new_workout_text = result["workout_recommendation"]
+        # Overwrite today's cached workout so Done/Modify/Skip log the new version.
+        storage.patch_daily_workout(
+            user_id,
+            {"workout_recommendation": new_workout_text, "summary": result["summary"]},
+            date_str,
         )
-        if logged:
-            await update.message.reply_text(f"Got it — logged as: {result['actual_summary']}")
-        else:
-            await update.message.reply_text("Couldn't find that workout entry — it may have already been rotated out.")
+        await update.message.reply_text(
+            md_to_html(new_workout_text),
+            parse_mode="HTML",
+            reply_markup=_workout_log_keyboard(date_str),
+        )
     except Exception as exc:
-        logger.error("interpret_workout_modification failed for %s: %s", user_id, exc)
-        await update.message.reply_text("Had trouble logging that — try again in a moment.")
+        logger.error("get_modified_workout failed for %s: %s", user_id, exc)
+        await update.message.reply_text("Had trouble generating the new workout — try again in a moment.")
 
     return ConversationHandler.END
 
