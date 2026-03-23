@@ -162,7 +162,7 @@ async def send_morning_briefing(
             return
         except Exception as exc:
             logger.error("Garmin fetch error: %s", exc)
-            await bot.send_message(chat_id, "Had trouble fetching your Garmin data. Try again in a moment.")
+            await bot.send_message(chat_id, "Had trouble fetching your Garmin data. Try reconnecting using /connect_garmin to refresh the connection or try again in a moment.")
             return
 
     workout_history: list[dict] = profile.get("workout_history", [])
