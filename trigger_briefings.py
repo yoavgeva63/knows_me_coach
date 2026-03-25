@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()  # must run before local imports so AWS env vars are set before boto3 initialises
 
 from telegram import Bot
+from telegram.ext import ContextTypes
 
 import garmin
 import storage
@@ -56,8 +57,12 @@ async def _check_and_send(
     should_send = False
 
     if alarm_time == "sleep":
+        if now_hhmm < "05:00":
+            logger.info("Too early to check Garmin wake for %s (now %s).", user_id_str, now_hhmm)
+            return
+
         try:
-            garmin_data = garmin.fetch_daily_stats(user_id_str, force_refresh=True)
+            garmin_data = garmin.check_wake_status(user_id_str)
             garmin_dict = garmin_data or {}
 
             # 1. Official Garmin wake time from sleep summary.
@@ -131,12 +136,10 @@ async def _check_and_send_weekly(
     await send_weekly_briefing(bot, int(user_id_str), user_id_str)
 
 
-async def main() -> None:
+async def run_briefings_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Check all users and send morning briefings (and weekly summaries on Saturdays)."""
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    if not token:
-        logger.error("TELEGRAM_BOT_TOKEN must be set in .env")
-        return
+    # We no longer need TELEGRAM_BOT_TOKEN since we are running inside bot.py's JobQueue.
+    bot = context.bot
 
     all_user_ids = storage.list_all_user_ids()
     if not all_user_ids:
@@ -149,7 +152,6 @@ async def main() -> None:
     now_hhmm = now_israel.strftime("%H:%M")
     is_saturday = now_israel.weekday() == 5  # Monday=0 … Saturday=5
 
-    bot = Bot(token=token)
     for user_id_str in all_user_ids:
         try:
             await _check_and_send(bot, user_id_str, now_utc, today_israel, now_hhmm)
@@ -162,6 +164,5 @@ async def main() -> None:
             except Exception as exc:
                 logger.error("Weekly summary error for user %s: %s", user_id_str, exc)
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        # Small delay between users to avoid slamming the Garmin API with concurrent requests
+        await asyncio.sleep(2.0)

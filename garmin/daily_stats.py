@@ -214,6 +214,18 @@ _cache: dict[str, dict] = {}
 _CACHE_TTL = 7200  # seconds — refresh at most every two hours
 
 
+def check_wake_status(user_id: str) -> dict:
+    """Return only sleep and steps data required for wake detection to save API calls."""
+    client = get_garmin_client(user_id)
+    today = date.today().isoformat()
+    result = {
+        "sleep": _fetch_sleep(client, today),
+        "steps": _fetch_steps(client, today),
+    }
+    _refresh_tokens(user_id, client)
+    return result
+
+
 def fetch_daily_stats(user_id: str, force_refresh: bool = False) -> dict | None:
     """Return Garmin daily stats for a user, using an in-memory cache by default.
 

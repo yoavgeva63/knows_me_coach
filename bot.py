@@ -36,6 +36,7 @@ from nutrition_handlers import (
 )
 from profile_wizard import build_wizard_handler
 from workout_recommender import get_workout_recommendation
+from trigger_briefings import run_briefings_job
 
 load_dotenv()
 
@@ -509,6 +510,9 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_briefing_action, pattern=r"^action:"))
     app.add_handler(CallbackQueryHandler(handle_nutrition_callback, pattern=r"^nutr:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Register the 30-minute scheduled briefing check
+    app.job_queue.run_repeating(run_briefings_job, interval=1800, first=10)
 
     logger.info("Bot starting in polling mode…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
