@@ -112,6 +112,8 @@ def _fetch_sleep(client: Garmin, day: str) -> dict:
             # None until the Garmin watch syncs after waking.
             "wake_time_utc": wake_time_iso,
         }
+    except GarminConnectAuthenticationError:
+        raise
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -126,6 +128,8 @@ def _fetch_hrv(client: Garmin, day: str) -> dict:
             "weekly_avg": summary.get("weeklyAvg"),
             "status": summary.get("hrv_status"),
         }
+    except GarminConnectAuthenticationError:
+        raise
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -170,6 +174,8 @@ def _fetch_steps(client: Garmin, day: str) -> dict:
                 pass
 
         return {"total_steps": total, "recent_steps": recent_steps}
+    except GarminConnectAuthenticationError:
+        raise
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -190,6 +196,8 @@ def _fetch_last_activity(client: Garmin) -> dict:
             "calories": a.get("calories"),
             "avg_speed_mps": a.get("averageSpeed"),  # metres per second; None for non-GPS
         }
+    except GarminConnectAuthenticationError:
+        raise
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -210,6 +218,8 @@ def _fetch_recent_activities(client: Garmin, limit: int = 14) -> list:
                 "avg_speed_mps": a.get("averageSpeed"),
             })
         return result
+    except GarminConnectAuthenticationError:
+        raise
     except Exception:
         return []
 
