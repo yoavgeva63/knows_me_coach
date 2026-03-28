@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 # Auth helpers
 # ---------------------------------------------------------------------------
 
+_client_cache: dict[str, Garmin] = {}
+
+
 def get_garmin_client(user_id: str) -> Garmin:
     """Return an authenticated Garmin client by restoring stored OAuth tokens.
 
@@ -35,6 +38,9 @@ def get_garmin_client(user_id: str) -> Garmin:
     Raises:
         GarminConnectAuthenticationError: if no tokens are stored or they are invalid.
     """
+    if user_id in _client_cache:
+        return _client_cache[user_id]
+
     tokens_json = storage.load_garmin_tokens(user_id)
     if not tokens_json:
         raise GarminConnectAuthenticationError(
@@ -43,6 +49,8 @@ def get_garmin_client(user_id: str) -> Garmin:
     client = Garmin()
     client.garth.loads(tokens_json)
     client.display_name = client.garth.profile.get("displayName")
+    
+    _client_cache[user_id] = client
     return client
 
 
@@ -63,6 +71,7 @@ def initial_login(user_id: str, email: str, password: str) -> None:
     client = Garmin(email, password)
     client.login()
     storage.save_garmin_tokens(user_id, client.garth.dumps())
+    _client_cache[user_id] = client
     logger.info("Garmin tokens saved for user %s.", user_id)
 
 
