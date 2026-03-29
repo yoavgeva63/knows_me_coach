@@ -289,8 +289,7 @@ async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         await update.message.reply_text(
             "Usage:\n"
-            "  /settime 07:30  — set a fixed time (Israel time)\n"
-            "  /settime sleep  — trigger when Garmin detects you've woken up"
+            "  /settime 07:30  — set a fixed time (Israel time)"
         )
 
 

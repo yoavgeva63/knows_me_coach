@@ -370,16 +370,11 @@ async def _ask_alarm_time(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             InlineKeyboardButton("08:00", callback_data="wiz:alarm:08:00"),
             InlineKeyboardButton("09:00", callback_data="wiz:alarm:09:00"),
         ],
-        [
-            InlineKeyboardButton("🌙 Sleep mode (auto-detect)", callback_data="wiz:alarm:sleep"),
-        ],
     ])
     await context.bot.send_message(
         update.effective_chat.id,
         "When should I send your morning briefing?\n"
-        "Pick a time or choose Sleep mode — I'll trigger it automatically "
-        "when Garmin detects you've woken up.\n"
-        "You can also type a custom time (e.g. 08:45).",
+        "Pick a time or type a custom time (e.g. 08:45).",
         reply_markup=kb,
     )
     return WIZARD_ALARM_TIME
@@ -621,7 +616,7 @@ async def wizard_alarm_time_text(update: Update, context: ContextTypes.DEFAULT_T
     elif re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", text):
         alarm = text
     else:
-        await update.message.reply_text("Please enter a valid time like 06:45, or 'sleep'.")
+        await update.message.reply_text("Please enter a valid time like 06:45.")
         return WIZARD_ALARM_TIME
     context.user_data["profile"]["morning_alarm_time"] = alarm
     return await _advance(update, context, after_field="morning_alarm_time")

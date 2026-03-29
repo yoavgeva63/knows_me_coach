@@ -56,64 +56,53 @@ async def _check_and_send(
     alarm_time = prefs["alarm_time"]  # "HH:MM" or "sleep"
     should_send = False
 
-    if alarm_time == "sleep":
-        if now_hhmm < "05:00":
-            logger.info("Too early to check Garmin wake for %s (now %s).", user_id_str, now_hhmm)
-            return
+    # [DISABLED] Garmin polling for wake detection is disabled to prevent API rate limits (Option A).
+    #
+    # if alarm_time == "sleep":
+    #     if now_hhmm < "05:00":
+    #         logger.info("Too early to check Garmin wake for %s (now %s).", user_id_str, now_hhmm)
+    #         return
+    # 
+    #     try:
+    #         loop = asyncio.get_running_loop()
+    #         garmin_data = await loop.run_in_executor(None, garmin.check_wake_status, user_id_str)
+    #         garmin_dict = garmin_data or {}
+    # 
+    #         wake_utc_str = garmin_dict.get("sleep", {}).get("wake_time_utc")
+    #         has_early_wake = False
+    #         if wake_utc_str:
+    #             wake_utc = datetime.fromisoformat(wake_utc_str)
+    #             wake_israel = wake_utc.astimezone(TZ_ISRAEL)
+    #             if wake_israel.strftime("%Y-%m-%d") == today_israel and now_utc >= wake_utc:
+    #                 if wake_israel.hour >= 5:
+    #                     logger.info("Garmin wake detected for %s at %s (Israel).", user_id_str, wake_israel.strftime("%H:%M"))
+    #                     should_send = True
+    #                 else:
+    #                     has_early_wake = True
+    # 
+    #         if not should_send and not has_early_wake and "06:00" <= now_hhmm <= "16:00":
+    #             steps_info = garmin_dict.get("steps", {})
+    #             recent_steps = steps_info.get("recent_steps", 0) if isinstance(steps_info, dict) else 0
+    #             if recent_steps > 200:
+    #                 logger.info("Step-based wake detected for %s (%d recent steps).", user_id_str, recent_steps)
+    #                 should_send = True
+    #         
+    #         if not should_send and now_hhmm >= _SLEEP_MODE_FALLBACK:
+    #             logger.info("Sleep mode fallback reached for %s (%s).", user_id_str, now_hhmm)
+    #             should_send = True
+    #     except Exception as exc:
+    #         logger.error("Garmin fetch failed for %s: %s", user_id_str, exc)
+    #         if now_hhmm >= _SLEEP_MODE_FALLBACK:
+    #             should_send = True
+    # else:
 
-        try:
-            loop = asyncio.get_running_loop()
-            garmin_data = await loop.run_in_executor(None, garmin.check_wake_status, user_id_str)
-            garmin_dict = garmin_data or {}
+    # Fallback any legacy users who still have "sleep" in DynamoDB to 09:30 AM
+    # so they don't miss their briefings (since string comparison "09:00" < "sleep" fails)
+    effective_alarm_time = _SLEEP_MODE_FALLBACK if alarm_time == "sleep" else alarm_time
 
-            # 1. Official Garmin wake time from sleep summary.
-            #    Require wake_time >= 05:00 local time to ignore brief nighttime wakings.
-            wake_utc_str = garmin_dict.get("sleep", {}).get("wake_time_utc")
-            has_early_wake = False  # woke before 05:00 — likely a bathroom trip, not morning
-            if wake_utc_str:
-                wake_utc = datetime.fromisoformat(wake_utc_str)
-                wake_israel = wake_utc.astimezone(TZ_ISRAEL)
-                if wake_israel.strftime("%Y-%m-%d") == today_israel and now_utc >= wake_utc:
-                    if wake_israel.hour >= 5:
-                        logger.info(
-                            "Garmin wake detected for %s at %s (Israel).",
-                            user_id_str, wake_israel.strftime("%H:%M"),
-                        )
-                        should_send = True
-                    else:
-                        has_early_wake = True
-                        logger.info(
-                            "Garmin wake at %s is before 05:00 — treating as nighttime waking, skipping.",
-                            wake_israel.strftime("%H:%M"),
-                        )
-
-            # 2. Step-based fallback: steps sync faster than sleep summaries.
-            #    Uses recent_steps (last 60 min) instead of total daily steps so that
-            #    steps taken at 01:00 AM don't trigger the briefing at 06:00.
-            #    Window 06:00–16:00 prevents false positives from late-night activity
-            #    when sleep data hasn't synced yet (has_early_wake would be False).
-            if not should_send and not has_early_wake and "06:00" <= now_hhmm <= "16:00":
-                steps_info = garmin_dict.get("steps", {})
-                recent_steps = steps_info.get("recent_steps", 0) if isinstance(steps_info, dict) else 0
-                if recent_steps > 200:
-                    logger.info(
-                        "Step-based wake detected for %s (%d recent steps in last 60 min).",
-                        user_id_str, recent_steps,
-                    )
-                    should_send = True
-            
-            # 3. Hard fallback: send regardless if 09:30 has passed.
-            if not should_send and now_hhmm >= _SLEEP_MODE_FALLBACK:
-                logger.info("Sleep mode fallback reached for %s (%s).", user_id_str, now_hhmm)
-                should_send = True
-        except Exception as exc:
-            logger.error("Garmin fetch failed for %s: %s", user_id_str, exc)
-            if now_hhmm >= _SLEEP_MODE_FALLBACK:
-                should_send = True
-    else:
-        if now_hhmm >= alarm_time:
-            logger.info("Alarm time %s reached for user %s (now %s).", alarm_time, user_id_str, now_hhmm)
-            should_send = True
+    if now_hhmm >= effective_alarm_time:
+        logger.info("Alarm time %s reached for user %s (now %s).", effective_alarm_time, user_id_str, now_hhmm)
+        should_send = True
 
     if should_send:
         await send_morning_briefing(bot, int(user_id_str), user_id_str)

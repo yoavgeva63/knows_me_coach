@@ -63,8 +63,7 @@ ACTION_TOOLS = [
                 "time": {
                     "type": "string",
                     "description": (
-                        "HH:MM in Israel time (e.g. '07:00') or 'sleep' to trigger "
-                        "automatically when Garmin detects the user has woken up."
+                        "HH:MM in Israel time (e.g. '07:00')."
                     ),
                 }
             },
