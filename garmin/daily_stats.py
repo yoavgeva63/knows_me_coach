@@ -165,7 +165,8 @@ def _fetch_steps(client: Garmin, day: str) -> dict:
             if not ts_str:
                 continue
             try:
-                bucket_start = datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%f").replace(
+                # fromisoformat handles both fractional and non-fractional seconds
+                bucket_start = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).replace(
                     tzinfo=timezone.utc
                 )
                 if bucket_start >= cutoff_utc:

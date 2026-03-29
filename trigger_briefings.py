@@ -62,7 +62,8 @@ async def _check_and_send(
             return
 
         try:
-            garmin_data = garmin.check_wake_status(user_id_str)
+            loop = asyncio.get_running_loop()
+            garmin_data = await loop.run_in_executor(None, garmin.check_wake_status, user_id_str)
             garmin_dict = garmin_data or {}
 
             # 1. Official Garmin wake time from sleep summary.
@@ -141,7 +142,8 @@ async def run_briefings_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     # We no longer need TELEGRAM_BOT_TOKEN since we are running inside bot.py's JobQueue.
     bot = context.bot
 
-    all_user_ids = storage.list_all_user_ids()
+    loop = asyncio.get_running_loop()
+    all_user_ids = await loop.run_in_executor(None, storage.list_all_user_ids)
     if not all_user_ids:
         logger.info("No users found in database.")
         return

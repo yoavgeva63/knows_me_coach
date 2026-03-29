@@ -511,8 +511,8 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_nutrition_callback, pattern=r"^nutr:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Register the 30-minute scheduled briefing check
-    app.job_queue.run_repeating(run_briefings_job, interval=1800, first=10)
+    # Register the 5-minute scheduled briefing check
+    app.job_queue.run_repeating(run_briefings_job, interval=300, first=10)
 
     logger.info("Bot starting in polling mode…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

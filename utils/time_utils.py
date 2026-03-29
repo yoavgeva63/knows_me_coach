@@ -15,11 +15,10 @@ If DST-awareness is ever needed, swap the implementation here to use
 `zoneinfo.ZoneInfo("Asia/Jerusalem")` — no other files change.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+import zoneinfo
 
-_ISRAEL_UTC_OFFSET_H = 2  # UTC+2 (UTC+3 during DST — acceptable approximation)
-TZ_ISRAEL = timezone(timedelta(hours=_ISRAEL_UTC_OFFSET_H))  # use for .astimezone(TZ_ISRAEL)
-
+TZ_ISRAEL = zoneinfo.ZoneInfo("Asia/Jerusalem")
 
 def israel_now() -> datetime:
     """Return the current datetime in Israel time (timezone-aware)."""
